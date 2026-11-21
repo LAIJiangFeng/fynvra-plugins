@@ -21,6 +21,12 @@
       "commit": "428395fa81beb78202f8e5d0b531aeb56505d48b",
       "path": "official/com.fynvra.telegram",
       "changelog": "修复：带图片或文件的消息被忽略；配文里 @机器人 也算反馈"
+    },
+    {
+      "version": "0.1.2",
+      "commit": "73dc703f6c3656b4f45ac4a756f94889b048f169",
+      "path": "official/com.fynvra.telegram",
+      "changelog": "支持图片和文档附件（与 Fynvra 输入框相同的格式和上限）；未处理的附件在回复里说明"
     }
   ]
 }
