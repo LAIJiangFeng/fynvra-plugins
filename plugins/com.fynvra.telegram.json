@@ -15,6 +15,12 @@
       "commit": "6a11fe5cc3c12ae7886c1a3d187d57d581c918fd",
       "path": "official/com.fynvra.telegram",
       "changelog": "首个版本：由 Fynvra 内置的 Telegram 群反馈值班迁移而来，首次启动导入旧数据。"
+    },
+    {
+      "version": "0.1.1",
+      "commit": "428395fa81beb78202f8e5d0b531aeb56505d48b",
+      "path": "official/com.fynvra.telegram",
+      "changelog": "修复：带图片或文件的消息被忽略；配文里 @机器人 也算反馈"
     }
   ]
 }
