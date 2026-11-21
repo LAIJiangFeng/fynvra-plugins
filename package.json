@@ -1,0 +1,14 @@
+{
+  "name": "fynvra-plugins",
+  "private": true,
+  "type": "module",
+  "description": "Fynvra 插件注册表：条目、官方插件源码与构建/签名脚本（无 npm 依赖）",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test scripts/test",
+    "validate": "node scripts/validate.mjs"
+  }
+}

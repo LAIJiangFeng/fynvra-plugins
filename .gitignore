@@ -1,0 +1,8 @@
+# 构建输出与本地检出的 dist 分支
+.build/
+dist/
+node_modules/
+# 签名私钥绝不入库
+*.key
+*-signing-key.pem
+.DS_Store

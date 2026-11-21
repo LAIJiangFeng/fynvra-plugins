@@ -1,0 +1,38 @@
+# PR 检查：校验条目、构建变动的版本、生成扫描报告。
+# 只用 pull_request（不用 pull_request_target），只读权限，不引用任何 secret。
+name: check
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 单元测试
+        run: node --test scripts/test
+
+      - name: 校验条目
+        run: node scripts/validate.mjs
+
+      - name: 构建变动的版本
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: node scripts/build.mjs --changed "origin/$BASE_REF" --out .build
+
+      - name: 扫描报告
+        if: always()
+        run: |
+          if [ -d .build ]; then
+            node scripts/scan.mjs .build >> "$GITHUB_STEP_SUMMARY"
+          fi

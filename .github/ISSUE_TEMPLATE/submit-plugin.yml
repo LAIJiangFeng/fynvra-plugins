@@ -1,0 +1,66 @@
+name: 提交插件
+description: 不熟悉 PR 的作者可以用这个表单提交插件，维护者会代为创建注册表条目。
+title: "[提交插件] "
+labels: ["submit-plugin"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先阅读 [CONTRIBUTING.md](https://github.com/LAIJiangFeng/fynvra-plugins/blob/main/CONTRIBUTING.md)，确认插件根目录有 `fynvra-plugin.json`，并已在 Fynvra 中用「添加本地插件」测试过。
+  - type: input
+    id: repository
+    attributes:
+      label: 源码仓库地址
+      description: 公开的 https 仓库地址
+      placeholder: https://github.com/you/your-plugin
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: 提交 SHA
+      description: 要发布的那次提交的完整 40 位 SHA
+    validations:
+      required: true
+  - type: input
+    id: plugin-id
+    attributes:
+      label: 插件 id
+      description: 与 fynvra-plugin.json 中的 id 一致，例如 io.github.you.weather
+    validations:
+      required: true
+  - type: input
+    id: path
+    attributes:
+      label: 插件所在子目录
+      description: 插件不在仓库根目录时填写，否则留空
+  - type: textarea
+    id: description
+    attributes:
+      label: 说明
+      description: 插件做什么、分类（tools / integration / productivity / dev / other）、标签、版本更新说明
+    validations:
+      required: true
+  - type: checkboxes
+    id: permissions
+    attributes:
+      label: 权限
+      description: 勾选插件实际用到的权限（须与 fynvra-plugin.json 一致）
+      options:
+        - label: network（访问网络）
+        - label: filesystem（读写工作区以外的文件）
+        - label: shell（执行命令）
+        - label: env（读取环境变量）
+        - label: model-keys（使用模型密钥）
+  - type: textarea
+    id: permission-reason
+    attributes:
+      label: 权限用途
+      description: 逐项说明为什么需要这些权限
+  - type: input
+    id: contact
+    attributes:
+      label: 联系方式
+      description: 审核有问题时如何联系你（GitHub 用户名或邮箱）
+    validations:
+      required: true
