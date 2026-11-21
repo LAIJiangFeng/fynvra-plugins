@@ -1,6 +1,11 @@
 // 插件入口（清单 host.main → dist/index.js）：activate 组装 Telegram 客户端、服务与设置页，deactivate 停止。
 import { createTelegramService, type TelegramService, type TelegramServiceDeps } from './service.js';
-import { createHttpsPost, createTelegramApi, type TelegramApi } from './telegramApi.js';
+import {
+  createHttpsGet,
+  createHttpsPost,
+  createTelegramApi,
+  type TelegramApi,
+} from './telegramApi.js';
 import type { FynvraPluginApi, Unsubscribe } from './types/appPluginApi.js';
 import { buildSettingsUi, handleUiAction } from './ui.js';
 import { errorMessage } from './util.js';
@@ -85,7 +90,11 @@ export async function startPlugin(
 let running: RunningPlugin | undefined;
 
 export async function activate(api: FynvraPluginApi): Promise<void> {
-  const telegram = createTelegramApi({ http: createHttpsPost(() => api.net.proxyEnv()) });
+  const proxyEnv = () => api.net.proxyEnv();
+  const telegram = createTelegramApi({
+    http: createHttpsPost(proxyEnv),
+    download: createHttpsGet(proxyEnv),
+  });
   running = await startPlugin(api, telegram);
 }
 

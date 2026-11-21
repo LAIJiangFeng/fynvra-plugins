@@ -39,6 +39,12 @@ export type HttpPost = (
   options: { signal?: AbortSignal; timeoutMs: number }
 ) => Promise<HttpResponse>;
 
+/** GET 二进制（下载文件）；超过 maxBytes 立即中止并 reject。实现方不要把 url 写进错误。 */
+export type HttpGet = (
+  url: string,
+  options: { signal?: AbortSignal; timeoutMs: number; maxBytes: number }
+) => Promise<{ status: number; body: Buffer }>;
+
 export interface TgUser {
   id: number;
   is_bot?: boolean;
@@ -64,12 +70,17 @@ export interface TgMessage {
   /** 图片、文件等消息的配文与其中的 entities（外部数据，同上收窄） */
   caption?: string;
   caption_entities?: { type: string; offset: number; length: number }[];
-  /** 附件只用来判断有无与计数，不下载 */
+  /** 附件（外部数据，使用前逐项收窄，见 attachments.ts） */
   photo?: unknown[];
-  document?: { mime_type?: string; file_name?: string };
+  document?: { file_id?: string; file_size?: number; mime_type?: string; file_name?: string };
   video?: unknown;
   animation?: unknown;
   sticker?: unknown;
+  voice?: unknown;
+  video_note?: unknown;
+  audio?: unknown;
+  /** 相册：同一组的图片各是一条消息，配文只在其中一条 */
+  media_group_id?: string;
   reply_to_message?: { message_id: number; from?: TgUser };
   migrate_to_chat_id?: number;
   migrate_from_chat_id?: number;
@@ -95,11 +106,29 @@ export interface TelegramApi {
     signal?: AbortSignal
   ): Promise<{ messageId: number }>;
   setMyCommands(token: string, signal?: AbortSignal): Promise<void>;
+  getFile(
+    token: string,
+    fileId: string,
+    signal?: AbortSignal
+  ): Promise<{ file_path: string; file_size?: number }>;
+  /** 下载 getFile 给出的 file_path；超过 maxBytes 中止 */
+  downloadFile(
+    token: string,
+    filePath: string,
+    maxBytes: number,
+    signal?: AbortSignal
+  ): Promise<Buffer>;
 }
 
 const API_BASE = 'https://api.telegram.org';
 export const LONG_POLL_TIMEOUT_SEC = 30;
 const REQUEST_TIMEOUT_MS = 20_000;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
+/** file_path 只接受这些字符，且不许有空段、`.`、`..`，防止拼出别的 URL */
+const FILE_PATH = /^[A-Za-z0-9_.\-/]{1,256}$/;
+export function isSafeFilePath(path: string): boolean {
+  return FILE_PATH.test(path) && path.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
+}
 /** 429 最多等这么久再重试；更长的直接报错 */
 const MAX_RETRY_AFTER_SEC = 60;
 
@@ -120,6 +149,8 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 export interface TelegramApiOptions {
   http: HttpPost;
+  /** 下载文件用；缺省时 downloadFile 报错 */
+  download?: HttpGet;
   /** 测试注入，缺省真实等待 */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
@@ -222,6 +253,35 @@ export function createTelegramApi(options: TelegramApiOptions): TelegramApi {
       }
       return { messageId: result.message_id };
     },
+    async getFile(token, fileId, signal) {
+      const file = asRecord(await call(token, 'getFile', { file_id: fileId }, signal));
+      if (typeof file?.file_path !== 'string') {
+        throw new TelegramApiError('api', 'getFile: unexpected response');
+      }
+      return {
+        file_path: file.file_path,
+        ...(typeof file.file_size === 'number' ? { file_size: file.file_size } : {}),
+      };
+    },
+    async downloadFile(token, filePath, maxBytes, signal) {
+      if (!isSafeFilePath(filePath)) throw new TelegramApiError('api', 'downloadFile: unsafe file_path');
+      const download = options.download;
+      if (!download) throw new TelegramApiError('network', 'downloadFile: no downloader');
+      let response: { status: number; body: Buffer };
+      try {
+        response = await download(`${API_BASE}/file/bot${token}/${filePath}`, {
+          ...(signal ? { signal } : {}),
+          timeoutMs: DOWNLOAD_TIMEOUT_MS,
+          maxBytes,
+        });
+      } catch (error) {
+        throw new TelegramApiError('network', redactToken(`downloadFile: ${errorMessage(error)}`, token));
+      }
+      if (response.status !== 200) {
+        throw new TelegramApiError('api', `downloadFile: HTTP ${response.status}`);
+      }
+      return response.body;
+    },
     async setMyCommands(token, signal) {
       await call(
         token,
@@ -249,19 +309,30 @@ export function supportsProxyEnv(nodeVersion: string): boolean {
   return major > 24 || (major === 24 && minor >= 5) || (major === 22 && minor >= 21);
 }
 
+type HttpsSend = (
+  url: string,
+  options: {
+    method: 'GET' | 'POST';
+    payload?: string;
+    signal?: AbortSignal;
+    timeoutMs: number;
+    maxBytes: number;
+  }
+) => Promise<{ status: number; body: Buffer }>;
+
 /**
  * 生产用：每次请求现取 Fynvra 的代理设置（api.net.proxyEnv），交给 https.Agent 的 proxyEnv；错误文本不含 url。
  * 守卫同内置版：TLS 校验被关掉时不发 token；配了代理但 Node 不支持 proxyEnv 时拒绝，不悄悄直连。
  */
-export function createHttpsPost(
+function createHttpsSend(
   proxyEnv: () => Promise<PluginProxyEnv>,
-  nodeVersion: string = process.versions.node,
-  processEnv: Record<string, string | undefined> = process.env
-): HttpPost {
-  return (url, body, { signal, timeoutMs }) =>
+  nodeVersion: string,
+  processEnv: Record<string, string | undefined>
+): HttpsSend {
+  return (url, { method, payload, signal, timeoutMs, maxBytes }) =>
     proxyEnv().then(
       (current) =>
-        new Promise<HttpResponse>((resolve, reject) => {
+        new Promise<{ status: number; body: Buffer }>((resolve, reject) => {
           const env = current as Record<string, string | undefined>;
           // 代理握手不继承请求的 rejectUnauthorized：TLS 校验被全局关掉时不发 token
           if (disablesNodeTlsVerification(env) || disablesNodeTlsVerification(processEnv)) {
@@ -284,8 +355,10 @@ export function createHttpsPost(
             return;
           }
           const agent = new Agent({ proxyEnv: proxy, rejectUnauthorized: true });
-          const payload = JSON.stringify(body);
-          const done = (error?: Error, response?: HttpResponse) => {
+          let settled = false;
+          const done = (error?: Error, response?: { status: number; body: Buffer }) => {
+            if (settled) return;
+            settled = true;
             agent.destroy();
             if (error) reject(error);
             else if (response) resolve(response);
@@ -294,37 +367,38 @@ export function createHttpsPost(
             const req = request(
               url,
               {
-                method: 'POST',
+                method,
                 agent,
                 ...(signal ? { signal } : {}),
                 timeout: timeoutMs,
                 rejectUnauthorized: true,
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Content-Length': Buffer.byteLength(payload),
-                },
+                ...(payload === undefined
+                  ? {}
+                  : {
+                      headers: {
+                        'Content-Type': 'application/json',
+                        'Content-Length': Buffer.byteLength(payload),
+                      },
+                    }),
               },
               (res) => {
+                const tooLarge = () => {
+                  res.destroy();
+                  req.destroy();
+                  done(new Error('response too large'));
+                };
+                // 声明的长度已超限：不读正文直接中止
+                if (Number(res.headers['content-length'] ?? 0) > maxBytes) return tooLarge();
                 const chunks: Buffer[] = [];
                 let size = 0;
                 res.on('data', (chunk: Buffer) => {
                   size += chunk.length;
-                  if (size > 8 * 1024 * 1024) {
-                    res.destroy();
-                    done(new Error('response too large'));
-                    return;
-                  }
+                  if (size > maxBytes) return tooLarge();
                   chunks.push(chunk);
                 });
-                res.on('end', () => {
-                  let parsed: unknown;
-                  try {
-                    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-                  } catch {
-                    parsed = undefined;
-                  }
-                  done(undefined, { status: res.statusCode ?? 0, body: parsed });
-                });
+                res.on('end', () =>
+                  done(undefined, { status: res.statusCode ?? 0, body: Buffer.concat(chunks) })
+                );
                 res.on('error', () => done(new Error('response error')));
               }
             );
@@ -339,4 +413,38 @@ export function createHttpsPost(
           }
         })
     );
+}
+
+export function createHttpsPost(
+  proxyEnv: () => Promise<PluginProxyEnv>,
+  nodeVersion: string = process.versions.node,
+  processEnv: Record<string, string | undefined> = process.env
+): HttpPost {
+  const send = createHttpsSend(proxyEnv, nodeVersion, processEnv);
+  return async (url, body, { signal, timeoutMs }) => {
+    const response = await send(url, {
+      method: 'POST',
+      payload: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+      timeoutMs,
+      maxBytes: 8 * 1024 * 1024,
+    });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(response.body.toString('utf8'));
+    } catch {
+      parsed = undefined;
+    }
+    return { status: response.status, body: parsed };
+  };
+}
+
+/** 下载用的 GET：与 createHttpsPost 同一套代理与 TLS 守卫 */
+export function createHttpsGet(
+  proxyEnv: () => Promise<PluginProxyEnv>,
+  nodeVersion: string = process.versions.node,
+  processEnv: Record<string, string | undefined> = process.env
+): HttpGet {
+  const send = createHttpsSend(proxyEnv, nodeVersion, processEnv);
+  return (url, options) => send(url, { method: 'GET', ...options });
 }

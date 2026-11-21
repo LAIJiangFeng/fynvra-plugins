@@ -1,5 +1,7 @@
 // 移植自 Fynvra 内置 telegram/service.test.ts：改成 node:test + 假宿主 API。
 import assert from 'node:assert/strict';
+import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { TEMPLATES } from '../dist/content.js';
 import { createTelegramService, DUTY_IDLE_MS, FOLLOW_UP_TIMEOUT_MS } from '../dist/service.js';
@@ -265,9 +267,11 @@ describe('准入', () => {
     assert.deepEqual(bodies, ['页面白屏', '页面白屏', '点保存 没反应', '命令形式', '回复形式']);
   });
 
-  it('图片/文件：配文 @bot、/bug@bot、回复 bot 只发图入队并带附件说明；纯图与 sticker 不入队', async () => {
+  it('图片/文件：配文 @bot、/bug@bot、回复 bot 只发图入队并带附件；纯图与只发 sticker 不入队', async () => {
     const h = harness();
     await h.service.start();
+    h.tg.files.set('b', { data: '\xff\xd8\xff' });
+    h.tg.files.set('log', { data: 'log' });
     const photo = { photo: [{ file_id: 'a' }, { file_id: 'b' }] };
     // 表情占 2 个 UTF-16 单位，校验 caption_entities 按 UTF-16 偏移解析
     const caption = '📷截图 @fyn_bot 白屏了';
@@ -285,7 +289,7 @@ describe('准入', () => {
         reply_to_message: { message_id: 1, from: { id: BOT_ID } },
       }),
       message(CHAT_A, 53, undefined, photo),
-      withCaption(54, '日志 @fyn_bot', { document: { file_name: 'log.txt' } }),
+      withCaption(54, '日志 @fyn_bot', { document: { file_id: 'log', file_name: 'log.txt' } }),
       message(CHAT_A, 55, undefined, {
         sticker: { file_id: 's' },
         reply_to_message: { message_id: 1, from: { id: BOT_ID } },
@@ -306,45 +310,24 @@ describe('准入', () => {
     assert.deepEqual(bodies, [
       '📷截图 白屏了',
       '命令配图',
-      '（只发了图片，没有文字）',
+      '（只发了附件，没有文字）',
       '日志',
       '贴纸 配文',
     ]);
-    const note = '[附件：图片/文件 1 个，Fynvra 不查看附件内容]';
-    for (const text of texts.slice(0, 4)) {
+    const note = '[附件] 用户附带的 1 个图片/文档';
+    for (const [i, text] of texts.slice(0, 4).entries()) {
       // 附件说明是可信元数据：在 </untrusted-content> 之后
       const [inside, outside] = text.split('</untrusted-content>');
       assert.ok(outside.includes(note));
       assert.ok(!inside.includes(note));
-      assert.match(outside, /请对方用文字描述/);
+      assert.equal(h.prompts[i].attachments.length, 1);
+      assert.doesNotMatch(text, /不查看附件内容/);
     }
-    // sticker 不算附件
-    assert.doesNotMatch(texts[4], /附件：/);
-  });
-
-  it('同一人合并的多条消息附件数累加', async () => {
-    const h = harness();
-    await h.service.start();
-    const text = '@fyn_bot 两张图';
-    await deliver(
-      h,
-      [
-        message(CHAT_A, 60, undefined, {
-          caption: text,
-          caption_entities: mentions(text).entities,
-          photo: [{}],
-          date: 1_000,
-        }),
-        message(CHAT_A, 60, undefined, {
-          caption: '@fyn_bot 视频',
-          caption_entities: mentions('@fyn_bot 视频').entities,
-          video: {},
-          date: 1_001,
-        }),
-      ],
-      1
-    );
-    assert.match(h.prompts[0].text, /\[附件：图片\/文件 2 个/);
+    assert.deepEqual(h.prompts[3].attachments.map((a) => a.name), ['log.txt']);
+    // sticker 不支持，记为未处理
+    assert.doesNotMatch(texts[4], /用户附带/);
+    assert.match(texts[4], /以下附件未处理：贴纸（不支持的格式）/);
+    assert.equal(h.prompts[4].attachments, undefined);
   });
 
   it('未允许的群收到 @ 消息：记为候选，不入队', async () => {
@@ -851,5 +834,159 @@ describe('允许群', () => {
       h.service.getState().candidates.map((c) => c.chatId),
       [-300]
     );
+  });
+});
+
+describe('附件', () => {
+  const MB = 1024 * 1024;
+  const attachmentFiles = (h) => {
+    const dir = join(h.host.api.dataDir, 'attachments');
+    return existsSync(dir) ? readdirSync(dir) : [];
+  };
+  const captioned = (fromId, text, extra = {}) =>
+    message(CHAT_A, fromId, undefined, {
+      caption: text,
+      caption_entities: mentions(text).entities,
+      ...extra,
+    });
+
+  it('photo 取 ≤ 20 MB 中最大的一张；附件以 { file, name } 交给 channel.prompt，投出后删除文件', async () => {
+    const h = harness();
+    await h.service.start();
+    h.tg.files.set('m', { size: 5 * MB, data: 'jpeg' });
+    const update = captioned(70, '@fyn_bot 看图', {
+      photo: [
+        { file_id: 's', file_size: 1000 },
+        { file_id: 'm', file_size: 5 * MB },
+        { file_id: 'big', file_size: 25 * MB },
+      ],
+    });
+    await deliver(h, [update], 1);
+    assert.deepEqual(h.tg.calls.getFile, ['m']);
+    const [prompt] = h.prompts;
+    assert.equal(prompt.attachments.length, 1);
+    assert.match(prompt.attachments[0].file, /^[0-9a-f-]{36}\.jpg$/);
+    assert.equal(prompt.attachments[0].name, `photo-${update.message.message_id}.jpg`);
+    assert.deepEqual(prompt.existed, [true]);
+    await waitFor(() => assert.deepEqual(attachmentFiles(h), []));
+  });
+
+  it('文件名安全化：落盘只用 uuid 与安全扩展名，原始文件名作 name', async () => {
+    const h = harness();
+    await h.service.start();
+    h.tg.files.set('d1', { data: '%PDF' });
+    h.tg.files.set('d2', { data: 'x' });
+    await deliver(
+      h,
+      [
+        captioned(71, '@fyn_bot 两个文件', {
+          document: { file_id: 'd1', file_name: '../../报告\n.PDF' },
+          date: 1_000,
+        }),
+        captioned(71, '@fyn_bot 再一个', {
+          document: { file_id: 'd2', file_name: 'a.t?x' },
+          date: 1_001,
+        }),
+      ],
+      1
+    );
+    const { attachments } = h.prompts[0];
+    assert.match(attachments[0].file, /^[0-9a-f-]{36}\.pdf$/);
+    assert.equal(attachments[0].name, '../../报告.PDF');
+    assert.match(attachments[1].file, /^[0-9a-f-]{36}\.bin$/);
+    for (const { file } of attachments) assert.match(file, /^[A-Za-z0-9._-]+$/);
+  });
+
+  it('超过 20 MB 不下载；视频、语音、贴纸、动图被拒；下载失败；汇总写进投递正文', async () => {
+    const h = harness();
+    await h.service.start();
+    await deliver(
+      h,
+      [
+        captioned(72, '@fyn_bot 一堆附件', {
+          document: { file_id: 'huge', file_name: 'dump.zip', file_size: 21 * MB },
+          date: 1_000,
+        }),
+        // 每人每小时限 5 条：把几种不支持的放进同一条
+        captioned(72, '@fyn_bot 视频', {
+          video: { file_name: 'a.mp4' },
+          voice: {},
+          sticker: {},
+          date: 1_001,
+        }),
+        captioned(72, '@fyn_bot 动图', {
+          animation: { file_name: 'x.gif.mp4' },
+          document: { file_id: 'anim' },
+          date: 1_001,
+        }),
+        captioned(72, '@fyn_bot 大图', { photo: [{ file_id: 'p', file_size: 30 * MB }], date: 1_002 }),
+        captioned(72, '@fyn_bot 坏的', { document: { file_id: 'gone', file_name: 'b.txt' }, date: 1_002 }),
+      ],
+      1
+    );
+    assert.deepEqual(h.tg.calls.getFile, ['gone']);
+    assert.deepEqual(h.tg.calls.download, []);
+    const text = h.prompts[0].text;
+    assert.equal(h.prompts[0].attachments, undefined);
+    const tail = text.split('</untrusted-content>').slice(1).join('');
+    assert.match(tail, /已被拒绝/);
+    assert.match(
+      tail,
+      /以下附件未处理：dump\.zip（机器人只能下载 20 MB 以内的文件）、a\.mp4（不支持的格式）、语音（不支持的格式）、贴纸（不支持的格式）、x\.gif\.mp4（不支持的格式）、photo-\d+\.jpg（机器人只能下载 20 MB 以内的文件）、b\.txt（下载失败）/
+    );
+    assert.ok(h.state.logs.every((log) => !log.message.includes(TOKEN)));
+  });
+
+  it('相册：同一 media_group_id 的消息合并成一条；超过 10 张截断并记为 rejected', async () => {
+    const h = harness();
+    await h.service.start();
+    const album = [];
+    for (let i = 0; i < 12; i += 1) {
+      h.tg.files.set(`p${i}`, { data: `img${i}` });
+      const extra = { photo: [{ file_id: `p${i}` }], media_group_id: 'g1' };
+      album.push(i === 0 ? captioned(73, '@fyn_bot 一组截图', extra) : message(CHAT_A, 73, undefined, extra));
+    }
+    await deliver(h, album, 1);
+    await tick(30);
+    assert.equal(h.prompts.length, 1);
+    const [prompt] = h.prompts;
+    assert.equal(prompt.attachments.length, 10);
+    assert.match(prompt.text, /消息 (\d+, ){11}\d+/);
+    assert.match(prompt.text, /photo-\d+\.jpg（每条最多 10 张图、10 个文件）、photo-\d+\.jpg（每条最多 10 张图、10 个文件）/);
+  });
+
+  it('delivered: false 时保留文件等重试（不重复下载），条目被丢弃时删除', async () => {
+    const h = harness();
+    await h.service.start();
+    h.tg.files.set('k', { data: 'keep' });
+    const channel = h.host.api.channel;
+    const realPrompt = channel.prompt;
+    let refused = 0;
+    channel.prompt = async () => {
+      refused += 1;
+      return { delivered: false, rejected: [] };
+    };
+    h.tg.push([captioned(74, '@fyn_bot 留着', { photo: [{ file_id: 'k' }] })]);
+    await waitFor(() => assert.equal(refused, 1));
+    assert.equal(attachmentFiles(h).length, 1);
+    await h.service.maintain();
+    await waitFor(() => assert.equal(refused, 2));
+    assert.equal(h.tg.calls.getFile.length, 1);
+    assert.equal(attachmentFiles(h).length, 1);
+    channel.prompt = realPrompt;
+    assert.deepEqual(await h.service.removeGroup(CHAT_A), { ok: true });
+    await waitFor(() => assert.deepEqual(attachmentFiles(h), []));
+  });
+
+  it('核心拒收的附件接在群回复末尾，不另发消息', async () => {
+    const h = harness({
+      api: { promptRejected: (attachments) => attachments.map((a) => ({ name: a.name, reason: 'empty' })) },
+    });
+    await h.service.start();
+    h.tg.files.set('e', { data: '' });
+    await deliver(h, [captioned(75, '@fyn_bot 空文件', { document: { file_id: 'e', file_name: 'e.txt' } })], 1);
+    await h.report('sA', question);
+    await waitFor(() => assert.equal(h.sent.length, 1));
+    assert.equal(h.sent[0].text, 'r\n\n以下附件未处理：e.txt（没有文字内容）');
   });
 });

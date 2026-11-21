@@ -1,5 +1,9 @@
 // 测试用的假宿主 API 与假 Telegram 客户端（只依赖 Node 内置模块）。
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export const TOKEN = `123456789:${'A'.repeat(35)}`;
 export const KNOWN_KEY = 'known-provider-key-123';
@@ -76,6 +80,8 @@ export function fakeApi(options = {}) {
 
   const api = {
     pluginId: 'com.fynvra.telegram',
+    // 默认不创建；用到附件时插件自己建 attachments/
+    dataDir: options.dataDir ?? join(tmpdir(), `fyn-tg-test-${randomUUID()}`),
     log: (level, message) => state.logs.push({ level, message }),
     storage: {
       read: async () => {
@@ -117,13 +123,20 @@ export function fakeApi(options = {}) {
         state.refreshed.push(input.workspaceId);
       },
       originCommit: async () => ({ commit: 'a'.repeat(40) }),
-      prompt: async ({ sessionId, text }) => {
+      prompt: async ({ sessionId, text, attachments }) => {
         const session = own(sessionId);
-        if (session.status !== 'idle') return { delivered: false };
-        state.prompts.push({ sessionId, text });
+        if (session.status !== 'idle') return { delivered: false, rejected: [] };
+        const dir = join(api.dataDir, 'attachments');
+        state.prompts.push({
+          sessionId,
+          text,
+          ...(attachments
+            ? { attachments, existed: attachments.map((a) => existsSync(join(dir, a.file))) }
+            : {}),
+        });
         session.status = 'running';
         emit('channel.session', { sessionId, status: 'running' });
-        return { delivered: true };
+        return { delivered: true, rejected: options.promptRejected?.(attachments ?? []) ?? [] };
       },
       sessionStatus: async ({ sessionId }) => ({ status: own(sessionId).status }),
       snapshot: async () => structuredClone(state.snapshot),
@@ -195,7 +208,9 @@ export function fakeTelegram() {
   const queued = [];
   const sent = [];
   const offsets = [];
-  const calls = { getMe: 0, getUpdates: 0 };
+  const calls = { getMe: 0, getUpdates: 0, getFile: [], download: [] };
+  /** fileId → { size?, data }；没有的 fileId 下载失败 */
+  const files = new Map();
   let wake;
   const failures = { getMe: [] };
   const telegram = {
@@ -206,6 +221,17 @@ export function fakeTelegram() {
       return { id: 42, username: 'fyn_bot' };
     },
     setMyCommands: async () => undefined,
+    getFile: async (_token, fileId) => {
+      calls.getFile.push(fileId);
+      const file = files.get(fileId);
+      if (!file) throw new Error('getFile: HTTP 400 Bad Request: file not found');
+      return { file_path: `photos/${fileId}.bin`, ...(file.size ? { file_size: file.size } : {}) };
+    },
+    downloadFile: async (_token, filePath) => {
+      calls.download.push(filePath);
+      const fileId = filePath.replace(/^photos\//, '').replace(/\.bin$/, '');
+      return Buffer.from(files.get(fileId).data);
+    },
     getUpdates: async (_token, offset, signal) => {
       calls.getUpdates += 1;
       offsets.push(offset);
@@ -229,6 +255,7 @@ export function fakeTelegram() {
     offsets,
     calls,
     failures,
+    files,
     push(...items) {
       queued.push(...items);
       wake?.();

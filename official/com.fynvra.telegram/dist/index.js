@@ -1,6 +1,6 @@
 // 插件入口（清单 host.main → dist/index.js）：activate 组装 Telegram 客户端、服务与设置页，deactivate 停止。
 import { createTelegramService } from './service.js';
-import { createHttpsPost, createTelegramApi } from './telegramApi.js';
+import { createHttpsGet, createHttpsPost, createTelegramApi, } from './telegramApi.js';
 import { buildSettingsUi, handleUiAction } from './ui.js';
 import { errorMessage } from './util.js';
 /** 状态变化后合并多久再重新 render */
@@ -69,7 +69,11 @@ export async function startPlugin(api, telegram, options = {}) {
 }
 let running;
 export async function activate(api) {
-    const telegram = createTelegramApi({ http: createHttpsPost(() => api.net.proxyEnv()) });
+    const proxyEnv = () => api.net.proxyEnv();
+    const telegram = createTelegramApi({
+        http: createHttpsPost(proxyEnv),
+        download: createHttpsGet(proxyEnv),
+    });
     running = await startPlugin(api, telegram);
 }
 export async function deactivate() {

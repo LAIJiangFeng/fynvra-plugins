@@ -3,6 +3,7 @@
 // 群里只会收到经 api.channel.filterOutbound 过滤后的 triage 回复与固定模板。
 // 与内置版的差别只在依赖：会话、干净检出、编排快照、出站过滤、通知都走宿主 API（见 README「与内置版的差异」）。
 import { isTelegramRateLimit, maskTelegramToken, } from './model.js';
+import { addMessageAttachments, cleanupStaleAttachments, downloadAttachments, mergeAttachments, rejectionSummary, removeFiles, } from './attachments.js';
 import { dutyPrompt, MAX_FOLLOW_UPS, parseAssessment, parseBotMention, parseBugCommand, parseTriageInput, pullRequestSection, TEMPLATES, triagePrompt, } from './content.js';
 import { createTelegramStore, emptyTelegramData, MAX_CANDIDATES, MAX_CARDS, parseTelegramData, TOKEN_SECRET_KEY, } from './store.js';
 import { redactToken, TELEGRAM_TOKEN_PATTERN, TelegramApiError, } from './telegramApi.js';
@@ -17,17 +18,7 @@ const BACKOFF_MAX_MS = 60_000;
 const HOUR_MS = 60 * 60_000;
 const ITEM_TEXT_MAX = 4_000;
 /** 被识别为反馈但只有附件、没有文字时的正文 */
-const ATTACHMENT_ONLY_TEXT = '（只发了图片，没有文字）';
-/** 反馈附件数：photo 算 1 张，document、video、animation 各算 1 个；sticker 不算 */
-export function countAttachments(message) {
-    const present = (value) => value !== undefined && value !== null;
-    const photo = Array.isArray(message.photo) && message.photo.length > 0 ? 1 : 0;
-    // 动图消息同时带 document 字段，不重复计数
-    const document = present(message.document) && !present(message.animation) ? 1 : 0;
-    const video = present(message.video) ? 1 : 0;
-    const animation = present(message.animation) ? 1 : 0;
-    return photo + document + video + animation;
-}
+const ATTACHMENT_ONLY_TEXT = '（只发了附件，没有文字）';
 /** 宿主 channel.createSession 的标题上限 */
 const SESSION_TITLE_MAX = 200;
 /** 还在分诊阶段、回复它就是对这张卡片的追问回复的状态；其余状态的卡片被回复时按新反馈处理 */
@@ -98,6 +89,19 @@ export function createTelegramService(deps) {
     const warn = (message) => api.log('warn', safe(message));
     const notify = (title, body) => {
         api.notify({ title, body }).catch((error) => warn(`发送通知失败：${errorMessage(error)}`));
+    };
+    /** 条目被丢弃：删掉已下载的附件文件 */
+    const discardFiles = (items) => {
+        for (const item of items) {
+            if (!item.downloaded)
+                continue;
+            void removeFiles(item.downloaded.paths);
+            delete item.downloaded;
+        }
+    };
+    const dropQueue = (chatId) => {
+        discardFiles(queues.get(chatId) ?? []);
+        queues.delete(chatId);
     };
     // ---------- 状态与落盘 ----------
     const persist = () => {
@@ -291,7 +295,7 @@ export function createTelegramService(deps) {
             return;
         const group = groupOf(chatId);
         if (!group?.active) {
-            queues.delete(chatId);
+            dropQueue(chatId);
             return;
         }
         if (inflight.has(group.triageSessionId))
@@ -315,6 +319,28 @@ export function createTelegramService(deps) {
             const item = queue[0];
             if (!item || inflight.has(sessionId))
                 return;
+            if (!item.downloaded) {
+                const token = data.token;
+                item.downloaded = token
+                    ? await downloadAttachments({
+                        dataDir: api.dataDir,
+                        token,
+                        telegram: deps.telegram,
+                        refs: item.files.refs,
+                        warn,
+                    })
+                    : {
+                        attachments: [],
+                        paths: [],
+                        rejected: item.files.refs.map((ref) => ({ name: ref.name, reason: 'download-failed' })),
+                    };
+                // 下载期间条目被丢弃（群被移除、服务停止等）：文件随之删除
+                if (stopped || queues.get(chatId)?.[0] !== item) {
+                    discardFiles([item]);
+                    return;
+                }
+            }
+            const downloaded = item.downloaded;
             const card = item.cardId === undefined ? undefined : cardById(item.cardId);
             const context = item.contextCardId === undefined ? undefined : cardById(item.contextCardId);
             const prompt = triagePrompt({
@@ -341,13 +367,23 @@ export function createTelegramService(deps) {
                 sender: item.sender,
                 messageIds: item.messageIds,
                 text: item.texts.join('\n'),
-                attachments: item.attachments,
+                attachments: downloaded.attachments.length,
+                rejected: rejectionSummary([...item.files.rejected, ...downloaded.rejected]),
             });
             // 先登记在途条目：triage_report 可能在 prompt 返回前就到
-            inflight.set(sessionId, { ...item, reported: false });
+            const pending = { ...item, reported: false };
+            inflight.set(sessionId, pending);
             let delivered = false;
             try {
-                delivered = (await api.channel.prompt({ sessionId, text: prompt })).delivered;
+                const result = await api.channel.prompt({
+                    sessionId,
+                    text: prompt,
+                    ...(downloaded.attachments.length > 0 ? { attachments: downloaded.attachments } : {}),
+                });
+                delivered = result.delivered;
+                const late = rejectionSummary(result.rejected ?? []);
+                if (delivered && late)
+                    pending.lateRejected = late;
             }
             catch (error) {
                 inflight.delete(sessionId);
@@ -359,6 +395,8 @@ export function createTelegramService(deps) {
                 // 已投出即在跑；之后变成非忙状态就是这一轮结束（状态事件被合并时也不会漏）
                 if (!isBusy(statuses.get(sessionId)))
                     statuses.set(sessionId, 'running');
+                // 核心已在 prompt 内读完附件
+                discardFiles([item]);
                 queue.shift();
                 if (queue.length === 0)
                     queues.delete(chatId);
@@ -494,8 +532,28 @@ export function createTelegramService(deps) {
         const rawText = message.text ?? message.caption;
         const text = typeof rawText === 'string' ? rawText : '';
         const entities = message.entities ?? message.caption_entities;
-        const attachments = countAttachments(message);
-        if (!text && attachments === 0)
+        const files = { refs: [], rejected: [] };
+        const attachments = addMessageAttachments(files, message);
+        const time = message.date * 1000;
+        const mediaGroupId = typeof message.media_group_id === 'string' ? message.media_group_id : undefined;
+        const queue = queues.get(chat.id) ?? [];
+        const tail = queue[queue.length - 1];
+        // 已开始下载或投递的条目不再并入
+        const last = tail && !tail.downloaded && !(pumping.has(chat.id) && tail === queue[0]) ? tail : undefined;
+        if (mediaGroupId !== undefined &&
+            last?.mediaGroupId === mediaGroupId &&
+            last.fromId === from.id) {
+            // 相册的其余消息（通常没有配文和 @）：并入同一人同一相册的条目，不再计限流
+            if (text.trim())
+                last.texts.push(text.trim().slice(0, ITEM_TEXT_MAX));
+            last.messageIds.push(message.message_id);
+            mergeAttachments(last.files, files);
+            last.lastDate = time;
+            last.readyAt = now() + debounceMs;
+            scheduleChat(chat.id, debounceMs);
+            return;
+        }
+        if (!text && !attachments)
             return;
         const repliedId = message.reply_to_message?.from?.id === bot.id
             ? message.reply_to_message.message_id
@@ -517,11 +575,10 @@ export function createTelegramService(deps) {
                 parseBugCommand(text, bot.username) ??
                     parseBotMention(text, entities, bot.username);
         }
-        if (body === '' && attachments > 0)
+        if (body === '' && attachments)
             body = ATTACHMENT_ONLY_TEXT;
         if (!body)
             return;
-        const time = message.date * 1000;
         if (rateLimited(from.id, time)) {
             const noticed = rateNoticed.get(from.id);
             if (noticed === undefined || time - noticed > HOUR_MS) {
@@ -530,8 +587,6 @@ export function createTelegramService(deps) {
             }
             return;
         }
-        const queue = queues.get(chat.id) ?? [];
-        const last = queue[queue.length - 1];
         if (last &&
             last.fromId === from.id &&
             last.cardId === target.cardId &&
@@ -540,7 +595,9 @@ export function createTelegramService(deps) {
             // 同一人 3 秒内连续发的合成一条
             last.texts.push(body.slice(0, ITEM_TEXT_MAX));
             last.messageIds.push(message.message_id);
-            last.attachments += attachments;
+            mergeAttachments(last.files, files);
+            if (mediaGroupId !== undefined)
+                last.mediaGroupId = mediaGroupId;
             last.lastDate = time;
             last.readyAt = now() + debounceMs;
         }
@@ -553,12 +610,14 @@ export function createTelegramService(deps) {
                 messageIds: [message.message_id],
                 replyTo: message.message_id,
                 texts: [body.slice(0, ITEM_TEXT_MAX)],
-                attachments,
+                files,
+                ...(mediaGroupId !== undefined ? { mediaGroupId } : {}),
                 lastDate: time,
                 readyAt: now() + debounceMs,
             });
-            if (queue.length > MAX_QUEUE_PER_GROUP)
-                queue.splice(0, queue.length - MAX_QUEUE_PER_GROUP);
+            if (queue.length > MAX_QUEUE_PER_GROUP) {
+                discardFiles(queue.splice(0, queue.length - MAX_QUEUE_PER_GROUP));
+            }
         }
         queues.set(chat.id, queue);
         scheduleChat(chat.id, debounceMs);
@@ -576,7 +635,7 @@ export function createTelegramService(deps) {
         if (status === 'left' || status === 'kicked') {
             if (group)
                 group.active = false;
-            queues.delete(member.chat.id);
+            dropQueue(member.chat.id);
             data.candidates = data.candidates.filter((c) => c.chatId !== member.chat.id);
             commit();
             return;
@@ -726,6 +785,9 @@ export function createTelegramService(deps) {
         if (assessment)
             card.assessment = assessment;
         const replyTo = item.replyTo;
+        // 核心拒收的附件 AI 看不到：由插件接在回复末尾，仍是一次 @ 一次回复
+        if (item.lateRejected)
+            report.reply = `${report.reply}\n\n${item.lateRejected}`;
         try {
             const followUp = report.needInfo || (report.kind === 'bug' && !report.evidence);
             if (followUp) {
@@ -1084,6 +1146,8 @@ export function createTelegramService(deps) {
                 data = emptyTelegramData();
             }
             await migrateLegacy();
+            // 上次运行残留的附件（崩溃、停止时未删）：文件 mtime 是真实时间，用 Date.now
+            void cleanupStaleAttachments(api.dataDir, Date.now());
             connection = idleConnection();
             unsubscribes.push(api.on('channel.session', (payload) => {
                 const record = asRecord(payload);
@@ -1117,6 +1181,8 @@ export function createTelegramService(deps) {
                 clearTimeout(timer);
             chatTimers.clear();
             prChecks.clear();
+            for (const queue of queues.values())
+                discardFiles(queue);
             for (const off of unsubscribes.splice(0))
                 off();
             await stopPolling();
@@ -1213,7 +1279,7 @@ export function createTelegramService(deps) {
             if (!group)
                 return { ok: false, error: '群不存在' };
             data.groups = data.groups.filter((g) => g.chatId !== chatId);
-            queues.delete(chatId);
+            dropQueue(chatId);
             inflight.delete(group.triageSessionId);
             if (group.active) {
                 data.candidates.push({ chatId, title: group.title, seenAt: now() });

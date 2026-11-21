@@ -35,13 +35,15 @@ export interface TriageItemInput {
   sender: string;
   messageIds: number[];
   text: string;
-  /** 附件个数（插件统计，可信元数据）；缺省或 0 表示没有 */
+  /** 随本条交给核心的附件个数；缺省或 0 表示没有 */
   attachments?: number;
+  /** 未处理附件的汇总（rejectionSummary，文件名来自用户）；空串或缺省表示没有 */
+  rejected?: string;
 }
 
 /**
  * 投给 triage 会话的正文：说明在 `<untrusted-content>` 之外，外部文本全在里面并转义。
- * 附件说明是插件生成的可信元数据，放在标签之外的末尾，避免与用户可伪造的同样文字混淆。
+ * 附件说明是插件生成的可信元数据，放在标签之外的末尾；未处理附件的文件名来自用户，另包一层 untrusted。
  */
 export function triagePrompt(item: TriageItemInput): string {
   const head = item.card
@@ -77,8 +79,16 @@ export function triagePrompt(item: TriageItemInput): string {
     ...(item.attachments
       ? [
           '',
-          `[附件：图片/文件 ${item.attachments} 个，Fynvra 不查看附件内容]`,
-          '用户可能附了图片或文件，你看不到它们的内容；如果定位问题需要，请在 reply 里请对方用文字描述看到的现象，或粘贴报错原文。',
+          `[附件] 用户附带的 ${item.attachments} 个图片/文档已按 Fynvra 输入框的规则随本条投递：图片直接可见，文档文字在后面的 <untrusted-content source="attachment"> 里。`,
+        ]
+      : []),
+    ...(item.rejected
+      ? [
+          '',
+          '[附件] 下列附件已被拒绝、没有处理，请在 reply 里一并告诉用户（文件名来自用户）：',
+          '<untrusted-content source="telegram">',
+          escapeUntrusted(item.rejected),
+          '</untrusted-content>',
         ]
       : []),
   ].join('\n');

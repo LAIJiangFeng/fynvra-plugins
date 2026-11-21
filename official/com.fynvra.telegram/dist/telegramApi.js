@@ -24,6 +24,12 @@ export class TelegramApiError extends Error {
 const API_BASE = 'https://api.telegram.org';
 export const LONG_POLL_TIMEOUT_SEC = 30;
 const REQUEST_TIMEOUT_MS = 20_000;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
+/** file_path 只接受这些字符，且不许有空段、`.`、`..`，防止拼出别的 URL */
+const FILE_PATH = /^[A-Za-z0-9_.\-/]{1,256}$/;
+export function isSafeFilePath(path) {
+    return FILE_PATH.test(path) && path.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
+}
 /** 429 最多等这么久再重试；更长的直接报错 */
 const MAX_RETRY_AFTER_SEC = 60;
 function sleep(ms, signal) {
@@ -114,6 +120,38 @@ export function createTelegramApi(options) {
             }
             return { messageId: result.message_id };
         },
+        async getFile(token, fileId, signal) {
+            const file = asRecord(await call(token, 'getFile', { file_id: fileId }, signal));
+            if (typeof file?.file_path !== 'string') {
+                throw new TelegramApiError('api', 'getFile: unexpected response');
+            }
+            return {
+                file_path: file.file_path,
+                ...(typeof file.file_size === 'number' ? { file_size: file.file_size } : {}),
+            };
+        },
+        async downloadFile(token, filePath, maxBytes, signal) {
+            if (!isSafeFilePath(filePath))
+                throw new TelegramApiError('api', 'downloadFile: unsafe file_path');
+            const download = options.download;
+            if (!download)
+                throw new TelegramApiError('network', 'downloadFile: no downloader');
+            let response;
+            try {
+                response = await download(`${API_BASE}/file/bot${token}/${filePath}`, {
+                    ...(signal ? { signal } : {}),
+                    timeoutMs: DOWNLOAD_TIMEOUT_MS,
+                    maxBytes,
+                });
+            }
+            catch (error) {
+                throw new TelegramApiError('network', redactToken(`downloadFile: ${errorMessage(error)}`, token));
+            }
+            if (response.status !== 200) {
+                throw new TelegramApiError('api', `downloadFile: HTTP ${response.status}`);
+            }
+            return response.body;
+        },
         async setMyCommands(token, signal) {
             await call(token, 'setMyCommands', {
                 commands: [{ command: 'bug', description: '反馈 bug 或需求' }],
@@ -135,8 +173,8 @@ export function supportsProxyEnv(nodeVersion) {
  * 生产用：每次请求现取 Fynvra 的代理设置（api.net.proxyEnv），交给 https.Agent 的 proxyEnv；错误文本不含 url。
  * 守卫同内置版：TLS 校验被关掉时不发 token；配了代理但 Node 不支持 proxyEnv 时拒绝，不悄悄直连。
  */
-export function createHttpsPost(proxyEnv, nodeVersion = process.versions.node, processEnv = process.env) {
-    return (url, body, { signal, timeoutMs }) => proxyEnv().then((current) => new Promise((resolve, reject) => {
+function createHttpsSend(proxyEnv, nodeVersion, processEnv) {
+    return (url, { method, payload, signal, timeoutMs, maxBytes }) => proxyEnv().then((current) => new Promise((resolve, reject) => {
         const env = current;
         // 代理握手不继承请求的 rejectUnauthorized：TLS 校验被全局关掉时不发 token
         if (disablesNodeTlsVerification(env) || disablesNodeTlsVerification(processEnv)) {
@@ -149,8 +187,11 @@ export function createHttpsPost(proxyEnv, nodeVersion = process.versions.node, p
             return;
         }
         const agent = new Agent({ proxyEnv: proxy, rejectUnauthorized: true });
-        const payload = JSON.stringify(body);
+        let settled = false;
         const done = (error, response) => {
+            if (settled)
+                return;
+            settled = true;
             agent.destroy();
             if (error)
                 reject(error);
@@ -159,37 +200,37 @@ export function createHttpsPost(proxyEnv, nodeVersion = process.versions.node, p
         };
         try {
             const req = request(url, {
-                method: 'POST',
+                method,
                 agent,
                 ...(signal ? { signal } : {}),
                 timeout: timeoutMs,
                 rejectUnauthorized: true,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(payload),
-                },
+                ...(payload === undefined
+                    ? {}
+                    : {
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Content-Length': Buffer.byteLength(payload),
+                        },
+                    }),
             }, (res) => {
+                const tooLarge = () => {
+                    res.destroy();
+                    req.destroy();
+                    done(new Error('response too large'));
+                };
+                // 声明的长度已超限：不读正文直接中止
+                if (Number(res.headers['content-length'] ?? 0) > maxBytes)
+                    return tooLarge();
                 const chunks = [];
                 let size = 0;
                 res.on('data', (chunk) => {
                     size += chunk.length;
-                    if (size > 8 * 1024 * 1024) {
-                        res.destroy();
-                        done(new Error('response too large'));
-                        return;
-                    }
+                    if (size > maxBytes)
+                        return tooLarge();
                     chunks.push(chunk);
                 });
-                res.on('end', () => {
-                    let parsed;
-                    try {
-                        parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-                    }
-                    catch {
-                        parsed = undefined;
-                    }
-                    done(undefined, { status: res.statusCode ?? 0, body: parsed });
-                });
+                res.on('end', () => done(undefined, { status: res.statusCode ?? 0, body: Buffer.concat(chunks) }));
                 res.on('error', () => done(new Error('response error')));
             });
             req.on('timeout', () => req.destroy(new Error('request timed out')));
@@ -201,4 +242,29 @@ export function createHttpsPost(proxyEnv, nodeVersion = process.versions.node, p
             done(new Error(error.code ?? 'request failed'));
         }
     }));
+}
+export function createHttpsPost(proxyEnv, nodeVersion = process.versions.node, processEnv = process.env) {
+    const send = createHttpsSend(proxyEnv, nodeVersion, processEnv);
+    return async (url, body, { signal, timeoutMs }) => {
+        const response = await send(url, {
+            method: 'POST',
+            payload: JSON.stringify(body),
+            ...(signal ? { signal } : {}),
+            timeoutMs,
+            maxBytes: 8 * 1024 * 1024,
+        });
+        let parsed;
+        try {
+            parsed = JSON.parse(response.body.toString('utf8'));
+        }
+        catch {
+            parsed = undefined;
+        }
+        return { status: response.status, body: parsed };
+    };
+}
+/** 下载用的 GET：与 createHttpsPost 同一套代理与 TLS 守卫 */
+export function createHttpsGet(proxyEnv, nodeVersion = process.versions.node, processEnv = process.env) {
+    const send = createHttpsSend(proxyEnv, nodeVersion, processEnv);
+    return (url, options) => send(url, { method: 'GET', ...options });
 }

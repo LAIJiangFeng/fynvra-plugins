@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  createHttpsGet,
   createHttpsPost,
   createTelegramApi,
   redactToken,
@@ -140,6 +141,45 @@ describe('telegram api', () => {
     assert.equal(error.kind, 'network');
     assert.ok(!error.message.includes(TOKEN));
     assert.match(error.message, /<token>/);
+  });
+
+  it('getFile 与 downloadFile：URL 带 token，错误不带；file_path 只接受安全字符', async () => {
+    const { http, calls } = fakeHttp([
+      { status: 200, body: { ok: true, result: { file_id: 'x', file_path: 'photos/f_1.jpg', file_size: 9 } } },
+    ]);
+    const downloads = [];
+    const download = async (url, options) => {
+      downloads.push({ url, options });
+      if (downloads.length === 2) throw new Error(`connect ECONNREFUSED ${url}`);
+      if (downloads.length === 3) return { status: 404, body: Buffer.alloc(0) };
+      return { status: 200, body: Buffer.from('jpeg') };
+    };
+    const api = createTelegramApi({ http, download });
+    assert.deepEqual(await api.getFile(TOKEN, 'x'), { file_path: 'photos/f_1.jpg', file_size: 9 });
+    assert.deepEqual(calls[0].body, { file_id: 'x' });
+    assert.equal((await api.downloadFile(TOKEN, 'photos/f_1.jpg', 100)).toString(), 'jpeg');
+    assert.equal(downloads[0].url, `https://api.telegram.org/file/bot${TOKEN}/photos/f_1.jpg`);
+    assert.equal(downloads[0].options.maxBytes, 100);
+    for (const kind of ['network', 'api']) {
+      const error = await caught(api.downloadFile(TOKEN, 'photos/f_1.jpg', 100));
+      assert.equal(error.kind, kind);
+      assert.ok(!error.message.includes(TOKEN));
+    }
+    for (const bad of ['../x', 'a//b', '/abs', 'a?b=1', 'a#b', 'x/../../y', 'a b', '@evil.com/x']) {
+      const error = await caught(api.downloadFile(TOKEN, bad, 100));
+      assert.match(error.message, /unsafe file_path/);
+    }
+    assert.equal(downloads.length, 3);
+  });
+
+  it('createHttpsGet 同样有 TLS 守卫，错误不含 token', async () => {
+    const api = createTelegramApi({
+      http: fakeHttp([]).http,
+      download: createHttpsGet(async () => ({}), '24.5.0', { NODE_TLS_REJECT_UNAUTHORIZED: '0' }),
+    });
+    const error = await caught(api.downloadFile(TOKEN, 'photos/a.jpg', 100));
+    assert.match(error.message, /NODE_TLS_REJECT_UNAUTHORIZED/);
+    assert.ok(!error.message.includes(TOKEN));
   });
 
   it('redactToken 打码已知 token 与任何像 token 的串', () => {
