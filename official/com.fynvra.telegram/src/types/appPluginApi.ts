@@ -1,0 +1,144 @@
+// Fynvra 插件作者用的宿主 API 类型（ARCHITECTURE §7.12「Fynvra 插件」）。
+// 插件入口（清单的 host.main，ESM）导出 activate(api)，可选 deactivate()；api 的每个方法经 RPC 交给 Main 处理，
+// Main 按清单权限检查。本文件只有类型，插件仓库可整份照抄。
+// 照抄自 Fynvra src/shared/types/appPluginApi.ts；legacy 段按 H4a 约定的形状补上。
+
+export type PluginLogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/** workspaces.list() 的一项；不含路径 */
+export interface PluginWorkspace {
+  id: string;
+  name: string;
+  /** 是否 git 工作区 */
+  git: boolean;
+}
+
+/** net.proxyEnv() 的结果：只有这三个键，没有代理时缺省 */
+export interface PluginProxyEnv {
+  HTTP_PROXY?: string;
+  HTTPS_PROXY?: string;
+  NO_PROXY?: string;
+}
+
+export type Unsubscribe = () => void;
+
+/** 渠道会话的档位：只读分诊 triage，或受限值班 restricted（规则同内置 Telegram） */
+export type ChannelProfile = 'triage' | 'restricted';
+
+/** 会话状态；已归档为 archived，会话已被用户删掉为 missing */
+export type ChannelSessionStatus =
+  | 'idle'
+  | 'running'
+  | 'waiting-approval'
+  | 'error'
+  | 'archived'
+  | 'missing';
+
+/** channel.snapshot() 的结果：只有协调者会话属于本插件的 run 与其下的 task */
+export interface ChannelSnapshot {
+  runs: { id: string; coordinatorSessionId: string }[];
+  tasks: {
+    id: string;
+    runId: string;
+    title: string;
+    status: 'todo' | 'in-progress' | 'in-review' | 'completed' | 'failed' | 'abandoned';
+    pullRequest?: { url: string };
+  }[];
+}
+
+/** channel.filterOutbound() 的结果：本机信息已替换；命中密钥时整条拒绝 */
+export type ChannelFilterResult = { ok: true; text: string } | { ok: false; reason: 'secret' };
+
+/** 事件 `channel.session`：本插件会话的状态变化 */
+export interface ChannelSessionEvent {
+  sessionId: string;
+  status: ChannelSessionStatus;
+}
+
+/** 事件 `channel.orchestrationChanged`：该工作区有本插件的 run 时才发 */
+export interface ChannelOrchestrationEvent {
+  workspaceId: string;
+}
+
+/** 宿主调插件 `channel.report` 的入参：本插件 triage 会话里的 triage_report 等调用（input 未收窄） */
+export interface ChannelReportCall {
+  sessionId: string;
+  method: string;
+  input: unknown;
+}
+
+/** `channel.report` 处理函数的返回值（同 host-invoke 的 HostCallResult） */
+export type ChannelReportResult =
+  | ({ ok: true } & Record<string, unknown>)
+  | { ok: false; error: string };
+
+export interface FynvraPluginApi {
+  /** 本插件 id（市场 id） */
+  readonly pluginId: string;
+  /** 写进 Fynvra 日志（前缀 `[plugin:<id>]`，每秒最多 100 行，输出前抹掉本插件的密钥）；不等待结果 */
+  log(level: PluginLogLevel, message: string): void;
+  /** 私有 JSON 存储（≤ 5 MB，原子写）；没写过时 read 返回 null */
+  storage: {
+    read<T = unknown>(): Promise<T | null>;
+    write(value: unknown): Promise<void>;
+  };
+  /** 按插件隔离的密钥；key `[A-Za-z0-9_.-]{1,64}`，value ≤ 4 KB，null 删除 */
+  secrets: {
+    get(key: string): Promise<string | null>;
+    set(key: string, value: string | null): Promise<void>;
+  };
+  /** 桌面通知（需要 notifications 权限；遵守通知总开关与提示音） */
+  notify(input: { title: string; body: string }): Promise<void>;
+  net: {
+    /** 当前的代理环境变量（需要 network 权限）；插件进程本身不带代理变量 */
+    proxyEnv(): Promise<PluginProxyEnv>;
+  };
+  workspaces: {
+    /** 已挂入的工作区（需要 workspaces 权限），不含路径 */
+    list(): Promise<PluginWorkspace[]>;
+  };
+  /** 渠道 API（全部需要 channel 权限，只能作用于本插件拥有的会话 / 工作区 / 任务） */
+  channel: {
+    /** 在工作区的干净检出里建档位会话（须是有默认分支与远端的 git 工作区），归属本插件 */
+    createSession(input: {
+      workspaceId: string;
+      profile: ChannelProfile;
+      title: string;
+    }): Promise<{ sessionId: string }>;
+    /** 把干净检出切到 origin 默认分支最新提交（本插件该工作区有会话在跑时拒绝） */
+    refreshCheckout(input: { workspaceId: string }): Promise<void>;
+    originCommit(input: { workspaceId: string }): Promise<{ commit: string }>;
+    /** 空闲则投递，忙时排队；text ≤ 64 KB */
+    prompt(input: { sessionId: string; text: string }): Promise<{ delivered: boolean }>;
+    sessionStatus(input: { sessionId: string }): Promise<{ status: ChannelSessionStatus }>;
+    snapshot(input: { workspaceId: string }): Promise<ChannelSnapshot>;
+    filterOutbound(input: { text: string }): Promise<ChannelFilterResult>;
+    /** 只对本插件 run 下的任务；先过滤再存，命中密钥时拒绝；null 清除 */
+    setPullRequestNote(input: { taskId: string; text: string | null }): Promise<void>;
+  };
+  ui: {
+    /**
+     * 声明式设置页（需要 ui 权限）：整份替换本插件的设置页，Main 校验不通过时 reject。
+     * 形状见 UI 描述 v1（`src/shared/types/appPluginUi.ts` 的 PluginUi）。用户操作经
+     * `handle('ui.action', ({ action, itemKey?, values }) => ...)` 送达，返回 `{ ok: false, error }` 表示失败
+     */
+    render(schema: unknown): Promise<void>;
+  };
+  /** 一次性旧数据迁移（只对 com.fynvra.telegram 开放，H4a） */
+  legacy: {
+    /** 旧 telegram.json 的原始对象；没有时为 null */
+    telegramData(): Promise<unknown | null>;
+    /** 停掉内置服务并把旧文件改名留底；可重复调用 */
+    telegramMigrated(): Promise<void>;
+  };
+  /** 订阅宿主事件（如 H3 的 channel.session）；返回取消订阅 */
+  on(event: string, handler: (payload: unknown) => void): Unsubscribe;
+  /** 处理宿主发来的调用（如 H2 的 ui.action）；同名再注册覆盖；处理函数抛错时只把 message 传回 */
+  handle(name: string, handler: (args: unknown) => unknown): Unsubscribe;
+}
+
+/** 插件入口模块的形状 */
+export interface FynvraPluginModule {
+  activate(api: FynvraPluginApi): void | Promise<void>;
+  deactivate?(): void | Promise<void>;
+}
