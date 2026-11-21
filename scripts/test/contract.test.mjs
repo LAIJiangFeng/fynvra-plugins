@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { REPO_URL, validateEntry, validateManifest, validateRevoked } from '../lib/contract.mjs';
+import { REPO_URL, validateEntry, validateIndex, validateManifest, validateRevoked } from '../lib/contract.mjs';
 import { compareVersions } from '../lib/semver.mjs';
 
 const SHA = 'a'.repeat(40);
@@ -96,4 +96,72 @@ test('版本比较遵循 semver 优先级', () => {
   assert.equal(compareVersions('1.10.0', '1.9.9'), 1);
   assert.equal(compareVersions('1.0.0-alpha.2', '1.0.0-alpha.10'), -1);
   assert.equal(compareVersions('2.0.0', '2.0.0'), 0);
+});
+
+// ---- 契约 v1.1：kind / host.main / 按 kind 的权限词表 / 索引 kind ----
+
+const baseManifest = () => ({ schemaVersion: 1, id: 'com.fynvra.bot', name: 'Bot', version: '1.0.0', description: '', author: 'a', license: 'MIT', permissions: [] });
+const fynvraManifest = () => ({ ...baseManifest(), kind: 'fynvra', host: { main: 'dist/main.mjs' }, permissions: ['notifications', 'channel'] });
+
+test('kind 缺省按 pi，fynvra 类需要合法 host.main', () => {
+  assert.deepEqual(validateManifest(baseManifest()), []);
+  assert.deepEqual(validateManifest({ ...baseManifest(), kind: 'pi' }), []);
+  assert.deepEqual(validateManifest(fynvraManifest()), []);
+  assert.deepEqual(validateManifest({ ...fynvraManifest(), host: { main: 'main.js' } }), []);
+  assert.ok(validateManifest({ ...baseManifest(), kind: 'other' }).length > 0);
+  // pi 类不能声明 host
+  assert.ok(validateManifest({ ...baseManifest(), host: { main: 'main.js' } }).length > 0);
+  const bad = [undefined, {}, { main: 'main.js', extra: 1 }, { main: '../main.js' }, { main: 'a/../main.js' }, { main: 'dist\\main.js' }, { main: 'C:/main.js' }, { main: '/main.js' }, { main: 'main.ts' }, { main: 'main.cjs' }, { main: 'main' }, { main: '' }];
+  for (const host of bad) {
+    const m = fynvraManifest();
+    if (host === undefined) delete m.host;
+    else m.host = host;
+    assert.match(validateManifest(m).join('\n'), /host/, `应拒绝 host=${JSON.stringify(host)}`);
+  }
+});
+
+test('权限词表按 kind 校验', () => {
+  for (const p of ['network', 'filesystem', 'shell', 'env', 'model-keys']) assert.deepEqual(validateManifest({ ...baseManifest(), permissions: [p] }), []);
+  for (const p of ['notifications', 'workspaces', 'channel', 'ui']) assert.ok(validateManifest({ ...baseManifest(), permissions: [p] }).length > 0, `pi 不应接受 ${p}`);
+  for (const p of ['notifications', 'network', 'workspaces', 'channel', 'ui']) assert.deepEqual(validateManifest({ ...fynvraManifest(), permissions: [p] }), []);
+  for (const p of ['filesystem', 'shell', 'env', 'model-keys', 'root']) assert.ok(validateManifest({ ...fynvraManifest(), permissions: [p] }).length > 0, `fynvra 不应接受 ${p}`);
+});
+
+const indexOf = (plugin) => ({
+  schemaVersion: 1,
+  sequence: 1,
+  generatedAt: '2026-01-01T00:00:00.000Z',
+  revoked: [],
+  plugins: [
+    {
+      ...official(),
+      kind: 'pi',
+      versions: [
+        {
+          version: '1.0.0',
+          commit: SHA,
+          permissions: ['shell'],
+          changelog: '',
+          publishedAt: '2026-01-01T00:00:00.000Z',
+          package: { path: 'packages/com.fynvra.demo/1.0.0.zip', sha256: 'b'.repeat(64), size: 10 },
+        },
+      ],
+      ...plugin,
+    },
+  ],
+});
+
+test('索引插件级 kind 必填，权限按 kind 校验，fynvra 只接受 official', () => {
+  assert.deepEqual(validateIndex(indexOf({})), []);
+  const noKind = indexOf({});
+  delete noKind.plugins[0].kind;
+  assert.match(validateIndex(noKind).join('\n'), /kind/);
+  assert.match(validateIndex(indexOf({ kind: 'x' })).join('\n'), /kind/);
+  // fynvra 类的版本权限用 fynvra 词表
+  assert.match(validateIndex(indexOf({ kind: 'fynvra' })).join('\n'), /未知权限/);
+  const ok = indexOf({ kind: 'fynvra' });
+  ok.plugins[0].versions[0].permissions = ['notifications'];
+  assert.deepEqual(validateIndex(ok), []);
+  ok.plugins[0].tier = 'reviewed';
+  assert.match(validateIndex(ok).join('\n'), /Fynvra 插件目前只接受官方插件/);
 });

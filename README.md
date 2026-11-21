@@ -9,6 +9,11 @@
   - `readme/<id>/<version>.md` 插件说明
   - `published.json` 已发布版本记录，保证同一版本号永远对应同一个包
 
+插件分两类，由清单 `fynvra-plugin.json` 的 `kind` 字段区分：
+
+- **PI 插件**（`kind: "pi"`，缺省值）：普通的 pi 扩展或 pi 包，在对话里提供工具、命令等。第三方可以提交。
+- **Fynvra 插件**（`kind: "fynvra"`）：在 Fynvra 后台独立进程常驻运行，只能通过宿主 API 做事，入口由 `host.main` 指定。**目前只接受官方插件**，由维护者发布。
+
 所有插件（包括官方插件）都要经过维护者审核才能进入市场。分级只有两档：`official`（官方，源码在本仓库 `official/` 下）和 `reviewed`（第三方，已审核）。
 
 ## 在 Fynvra 里安装插件

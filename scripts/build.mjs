@@ -6,11 +6,11 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
-import { isSelfRepo, isValidPath, MAX_PACKAGE_SIZE, MAX_README_SIZE } from './lib/contract.mjs';
+import { isSelfRepo, isValidPath, manifestKind, MAX_PACKAGE_SIZE, MAX_README_SIZE } from './lib/contract.mjs';
 import { fail, loadEntries, REPO_ROOT } from './lib/entries.mjs';
 import { collectFiles, copyTree } from './lib/files.mjs';
 import { sha256 } from './lib/hash.mjs';
-import { checkManifest, checkPluginRoot, checkPublished, hasDependencies } from './lib/plugin.mjs';
+import { checkHostMain, checkManifest, checkPluginRoot, checkPublished, hasDependencies, pluginKind } from './lib/plugin.mjs';
 import { createZip, readZip } from './lib/zip.mjs';
 
 const { values } = parseArgs({
@@ -138,9 +138,11 @@ function buildOne(entry, v) {
     const rec = published[`${id}@${version}`];
     const zip = readFileSync(join(distDir, pkgRel));
     if (sha256(zip) !== rec.sha256 || zip.length !== rec.size) throw new Error(`dist 中的 ${pkgRel} 与 published.json 记录不符`);
-    const mf = readZip(zip).find((e) => e.path === 'fynvra-plugin.json');
+    const zipEntries = readZip(zip);
+    const mf = zipEntries.find((e) => e.path === 'fynvra-plugin.json');
     if (!mf) throw new Error(`已发布包 ${pkgRel} 缺少 fynvra-plugin.json`);
-    const manifest = checkManifest(JSON.parse(mf.data.toString('utf8')), id, version);
+    const manifest = checkManifest(JSON.parse(mf.data.toString('utf8')), id, version, entry.tier);
+    checkHostMain(manifest, zipEntries.filter((e) => !e.isDir && !e.isSymlink).map((e) => e.path));
     writeOut(pkgRel, zip);
     let readme = null;
     const distReadme = join(distDir, readmeRel);
@@ -154,10 +156,11 @@ function buildOne(entry, v) {
 
   const src = join(out, 'src', id, version);
   fetchSource(entry, v, src);
-  const { manifest, pkg } = checkPluginRoot(src, id, version);
+  const { manifest, pkg } = checkPluginRoot(src, id, version, entry.tier);
   installDeps(src, pkg);
   const { files, skipped } = collectFiles(src);
   for (const s of skipped) console.warn(`  [${id}@${version}] 跳过符号链接或特殊文件：${s}`);
+  checkHostMain(manifest, files.map((f) => f.path));
   const zip = createZip(files.map((f) => ({ path: f.path, data: readFileSync(f.abs) })));
   if (zip.length > MAX_PACKAGE_SIZE) throw new Error(`插件包 ${zip.length} 字节，超过上限 ${MAX_PACKAGE_SIZE}`);
   writeOut(pkgRel, zip);
@@ -176,6 +179,7 @@ function buildOne(entry, v) {
       id,
       version,
       commit,
+      kind: manifestKind(m),
       permissions: m.permissions,
       engines: m.engines ?? null,
       package: pkgRef,
@@ -195,6 +199,14 @@ for (const { entry, v } of targets) {
     console.log(`${r.reused ? '复用' : '构建'} ${key}  ${r.package.sha256}  ${r.package.size} 字节`);
   } catch (e) {
     failures.push(`${key}: ${e.message}`);
+  }
+}
+// 本次构建中同一插件的各版本 kind 必须一致（完整检查在 publish.mjs）
+for (const id of new Set(results.map((r) => r.id))) {
+  try {
+    pluginKind(id, results.filter((r) => r.id === id).map((r) => r.kind));
+  } catch (e) {
+    failures.push(e.message);
   }
 }
 writeFileSync(join(out, 'build-manifest.json'), JSON.stringify({ schemaVersion: 1, results }, null, 2) + '\n');

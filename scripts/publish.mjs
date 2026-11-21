@@ -8,6 +8,7 @@ import { parseArgs } from 'node:util';
 import { validateIndex } from './lib/contract.mjs';
 import { fail, loadEntries, loadRevoked } from './lib/entries.mjs';
 import { sha256 } from './lib/hash.mjs';
+import { pluginKind } from './lib/plugin.mjs';
 import { compareVersions } from './lib/semver.mjs';
 import { loadPrivateKey, nextSequence, signBytes } from './lib/sign.mjs';
 
@@ -44,6 +45,7 @@ const problems = [];
 const plugins = [...entries]
   .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   .map((e) => {
+    const kinds = [];
     const versions = e.versions.map((v) => {
       const key = `${e.id}@${v.version}`;
       const r = built.get(key);
@@ -53,6 +55,7 @@ const plugins = [...entries]
       if (pub && (pub.commit !== r.commit || pub.sha256 !== r.package.sha256 || pub.size !== r.package.size)) {
         return problems.push(`${key}: 已发布版本不可变，构建结果与 published.json 不一致`), null;
       }
+      kinds.push(r.kind ?? 'pi');
       return {
         version: v.version,
         ...(r.engines ? { engines: r.engines } : {}),
@@ -75,9 +78,19 @@ const plugins = [...entries]
       category: e.category,
       tags: e.tags,
       tier: e.tier,
+      kind: resolveKind(e.id, kinds),
       versions: versions.filter(Boolean).sort((a, b) => compareVersions(b.version, a.version)),
     };
   });
+function resolveKind(id, kinds) {
+  if (!kinds.length) return 'pi'; // 版本全部出错时已记入 problems
+  try {
+    return pluginKind(id, kinds);
+  } catch (err) {
+    problems.push(err.message);
+    return 'pi';
+  }
+}
 if (problems.length) fail(`无法发布：\n  ${problems.join('\n  ')}`);
 
 const index = {

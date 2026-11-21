@@ -1,4 +1,4 @@
-// 共同契约 v1 的校验：注册表条目、revoked.json、插件清单 fynvra-plugin.json、index.json。
+// 共同契约 v1.1 的校验：注册表条目、revoked.json、插件清单 fynvra-plugin.json、index.json。
 // 所有校验函数都返回错误信息数组（空数组表示通过），不抛异常，方便一次性列出全部问题。
 
 export const REPO_URL = 'https://github.com/LAIJiangFeng/fynvra-plugins';
@@ -13,7 +13,17 @@ const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$
 
 export const CATEGORIES = ['tools', 'integration', 'productivity', 'dev', 'other'];
 export const TIERS = ['official', 'reviewed'];
-export const PERMISSIONS = ['network', 'filesystem', 'shell', 'env', 'model-keys'];
+export const KINDS = ['pi', 'fynvra'];
+// 权限词表按插件类别区分
+export const PERMISSIONS_BY_KIND = {
+  pi: ['network', 'filesystem', 'shell', 'env', 'model-keys'],
+  fynvra: ['notifications', 'network', 'workspaces', 'channel', 'ui'],
+};
+export const PERMISSIONS = PERMISSIONS_BY_KIND.pi;
+export const FYNVRA_OFFICIAL_ONLY = 'Fynvra 插件目前只接受官方插件';
+
+// 清单缺省 kind 时按 pi 处理
+export const manifestKind = (m) => m?.kind ?? 'pi';
 
 export const MAX_PACKAGE_SIZE = 50 * 1024 * 1024;
 export const MAX_README_SIZE = 256 * 1024;
@@ -58,11 +68,17 @@ export function isValidPath(p) {
   return p.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
 }
 
-function checkPermissions(errs, where, v) {
+// host.main：包内相对 POSIX 路径（isValidPath 已排除反斜杠、盘符冒号和 ..），扩展名 .js 或 .mjs
+export function isValidHostMain(p) {
+  return isValidPath(p) && /\.m?js$/.test(p);
+}
+
+function checkPermissions(errs, where, v, kind = 'pi') {
   if (!Array.isArray(v)) return errs.push(`${where}: 必须是数组`);
+  const allowed = PERMISSIONS_BY_KIND[kind] ?? [];
   const seen = new Set();
   for (const p of v) {
-    if (!PERMISSIONS.includes(p)) errs.push(`${where}: 未知权限 ${JSON.stringify(p)}（可选 ${PERMISSIONS.join(', ')}）`);
+    if (!allowed.includes(p)) errs.push(`${where}: 未知权限 ${JSON.stringify(p)}（${kind} 类可选 ${allowed.join(', ')}）`);
     else if (seen.has(p)) errs.push(`${where}: 权限 ${p} 重复`);
     seen.add(p);
   }
@@ -162,7 +178,7 @@ export function validateRevoked(list, where = 'revoked.json') {
   return errs;
 }
 
-const MANIFEST_KEYS = ['schemaVersion', 'id', 'name', 'version', 'description', 'author', 'license', 'engines', 'permissions'];
+const MANIFEST_KEYS = ['schemaVersion', 'id', 'name', 'version', 'description', 'author', 'license', 'engines', 'permissions', 'kind', 'host'];
 
 // 校验插件根目录的 fynvra-plugin.json
 export function validateManifest(m, where = 'fynvra-plugin.json') {
@@ -177,7 +193,19 @@ export function validateManifest(m, where = 'fynvra-plugin.json') {
   checkStr(errs, `${where}.author`, m.author, 1, 100);
   checkStr(errs, `${where}.license`, m.license, 1, 40);
   checkEngines(errs, `${where}.engines`, m.engines);
-  checkPermissions(errs, `${where}.permissions`, m.permissions);
+  const kind = manifestKind(m);
+  if (!KINDS.includes(kind)) {
+    errs.push(`${where}.kind: 必须是 ${KINDS.join(' 或 ')}`);
+    return errs;
+  }
+  checkPermissions(errs, `${where}.permissions`, m.permissions, kind);
+  if (kind === 'fynvra') {
+    if (!isObj(m.host)) errs.push(`${where}.host: fynvra 类插件必须提供 host: { main }`);
+    else {
+      checkKeys(errs, `${where}.host`, m.host, ['main']);
+      if (!isValidHostMain(m.host.main)) errs.push(`${where}.host.main: 必须是包内相对 POSIX 路径（不含 ..、反斜杠或盘符），扩展名为 .js 或 .mjs`);
+    }
+  } else if (m.host !== undefined) errs.push(`${where}.host: 只有 fynvra 类插件可以声明`);
   return errs;
 }
 
@@ -189,7 +217,7 @@ function checkFileRef(errs, where, f, max) {
   if (!Number.isInteger(f.size) || f.size <= 0 || f.size > max) errs.push(`${where}.size: 必须是 1–${max} 的整数`);
 }
 
-const INDEX_PLUGIN_KEYS = ENTRY_KEYS;
+const INDEX_PLUGIN_KEYS = [...ENTRY_KEYS, 'kind'];
 const INDEX_VERSION_KEYS = ['version', 'engines', 'commit', 'permissions', 'changelog', 'publishedAt', 'package', 'readme'];
 
 // 校验完整的 index.json（schemaVersion 1）
@@ -211,6 +239,8 @@ export function validateIndex(idx) {
       if (ids.has(p.id)) errs.push(`${w}.id: ${p.id} 重复`);
       ids.add(p.id);
       checkCommon(errs, w, p);
+      if (!KINDS.includes(p.kind)) errs.push(`${w}.kind: 必须是 ${KINDS.join(' 或 ')}`);
+      if (p.kind === 'fynvra' && p.tier !== 'official') errs.push(`${w}.tier: ${FYNVRA_OFFICIAL_ONLY}`);
       if (!Array.isArray(p.versions) || p.versions.length === 0) return errs.push(`${w}.versions: 至少需要 1 个版本`);
       const vs = new Set();
       p.versions.forEach((v, j) => {
@@ -222,7 +252,7 @@ export function validateIndex(idx) {
         vs.add(v.version);
         checkEngines(errs, `${vw}.engines`, v.engines);
         if (typeof v.commit !== 'string' || !COMMIT_RE.test(v.commit)) errs.push(`${vw}.commit: 必须是 40 位十六进制`);
-        checkPermissions(errs, `${vw}.permissions`, v.permissions);
+        checkPermissions(errs, `${vw}.permissions`, v.permissions, KINDS.includes(p.kind) ? p.kind : 'pi');
         checkStr(errs, `${vw}.changelog`, v.changelog, 0, 2000);
         checkIso(errs, `${vw}.publishedAt`, v.publishedAt);
         checkFileRef(errs, `${vw}.package`, v.package, MAX_PACKAGE_SIZE);

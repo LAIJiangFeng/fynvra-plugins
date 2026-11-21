@@ -2,9 +2,18 @@
 
 感谢你为 Fynvra 写插件！本文说明怎么写插件、本地测试、提交审核以及发布更新。
 
+## 0. 两类插件
+
+| 类别 | 清单 `kind` | 运行方式 | 谁能提交 |
+| --- | --- | --- | --- |
+| PI 插件 | `"pi"`（缺省） | pi 扩展或 pi 包，在对话里提供工具、命令等 | 所有人 |
+| Fynvra 插件 | `"fynvra"` | 在 Fynvra 后台独立进程常驻运行，只能通过宿主 API 做事 | 目前只有维护者 |
+
+**Fynvra 插件目前只由维护者发布**：条目 `tier` 不是 `official` 时构建直接失败（「Fynvra 插件目前只接受官方插件」）。第三方暂时只能提交 PI 插件，下文除第 1.1 节外都是说 PI 插件。
+
 ## 1. 写一个插件
 
-Fynvra 插件就是一个 [pi](https://github.com/earendil-works/pi) 包，再加一个 `fynvra-plugin.json` 清单。最简单的做法是复制官方示例 [`official/com.fynvra.hello`](official/com.fynvra.hello)。
+PI 插件就是一个 [pi](https://github.com/earendil-works/pi) 包，再加一个 `fynvra-plugin.json` 清单。最简单的做法是复制官方示例 [`official/com.fynvra.hello`](official/com.fynvra.hello)。
 
 插件根目录至少包含：
 
@@ -54,13 +63,40 @@ LICENSE
 | `author` | 1–100 字符 |
 | `license` | 1–40 字符，例如 `MIT`、`Apache-2.0` |
 | `engines.fynvra` | 可选，只支持 `>=x.y.z` |
-| `permissions` | 见下文，没有就写 `[]` |
+| `permissions` | 见下文（词表按类别区分），没有就写 `[]` |
+| `kind` | 可选，`"pi"` 或 `"fynvra"`，缺省按 `"pi"` 处理 |
+| `host` | 只有 `kind: "fynvra"` 时使用且必填，见 1.1 节 |
 
 `id` 和 `version` 必须与注册表条目一致；索引中的权限和 engines 以这个文件为准。
 
+### 1.1 Fynvra 插件（仅维护者）
+
+Fynvra 插件不需要是 pi 包（不检查 `pi.extensions`，`package.json` 可选，只在有 `dependencies` 时用来安装依赖）。清单示例：
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "com.fynvra.example",
+  "name": "示例",
+  "version": "1.0.0",
+  "description": "……",
+  "author": "Fynvra",
+  "license": "Apache-2.0",
+  "kind": "fynvra",
+  "host": { "main": "dist/main.mjs" },
+  "permissions": ["notifications", "network"]
+}
+```
+
+- `host.main` 是入口文件，必须是 **ESM 格式的 JS**：包内相对路径，只用 `/` 分隔，不能含 `..`、反斜杠或盘符，扩展名 `.js` 或 `.mjs`，并且该文件必须真实打进插件包。
+- **构建时不会执行任何脚本**（不跑 `npm run build`、不编译 TypeScript）。作者要把构建好的 JS 一起提交到仓库，并且**不能压缩或混淆**，方便审核。
+- 条目 `tier` 必须是 `official`，同一插件的所有版本 `kind` 必须相同。
+
 ### 权限含义
 
-权限声明会展示给用户，也是审核依据。**它不是沙箱**：插件运行时拥有和 Fynvra 相同的能力，所以声明必须如实。
+权限声明会展示给用户，也是审核依据。词表按插件类别区分，出现词表外的值会被拒绝。
+
+**PI 插件**的权限**不是沙箱**：插件运行时拥有和 Fynvra 相同的能力，所以声明必须如实。
 
 | 权限 | 含义 |
 | --- | --- |
@@ -69,6 +105,16 @@ LICENSE
 | `shell` | 执行命令或启动子进程（`child_process` 等） |
 | `env` | 读取环境变量 |
 | `model-keys` | 读取或使用用户在 Fynvra 中配置的模型密钥 |
+
+**Fynvra 插件**只能通过宿主 API 做事，权限决定它能调用哪些 API：
+
+| 权限 | 含义 |
+| --- | --- |
+| `notifications` | 发送系统通知 |
+| `network` | 访问网络，并可取得 Fynvra 的代理设置 |
+| `workspaces` | 列出工作区（只有 id、名称、是否 git，不含路径） |
+| `channel` | 使用渠道 API：创建并驱动本插件自己的会话、查看本插件发起的任务，外发文本会先经过过滤 |
+| `ui` | 在设置页渲染声明式界面并接收用户操作 |
 
 用到依赖时，依赖的行为也算插件的行为。
 

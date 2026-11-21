@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { collectFiles } from '../lib/files.mjs';
 import { sha256 } from '../lib/hash.mjs';
-import { checkPluginRoot, checkPublished } from '../lib/plugin.mjs';
+import { checkHostMain, checkPluginRoot, checkPublished, pluginKind } from '../lib/plugin.mjs';
 import { createZip, readZip } from '../lib/zip.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'fynvra-test-'));
@@ -99,4 +99,48 @@ test('不可变检查', () => {
   assert.equal(checkPublished(published, 'com.example.demo', '1.0.1', 'c'.repeat(40)), 'new');
   assert.equal(checkPublished(published, 'com.example.demo', '1.0.0', 'a'.repeat(40)), 'reuse');
   assert.throws(() => checkPublished(published, 'com.example.demo', '1.0.0', 'c'.repeat(40)), /不能改为/);
+});
+
+// fynvra 类插件：不是 pi 包，只有清单和构建好的 ESM 入口
+function makeFynvraPlugin(dir, manifest = {}) {
+  mkdirSync(join(dir, 'dist'), { recursive: true });
+  writeFileSync(join(dir, 'dist', 'main.mjs'), 'export default {};\n');
+  writeFileSync(
+    join(dir, 'fynvra-plugin.json'),
+    JSON.stringify({ schemaVersion: 1, id: 'com.fynvra.bot', name: 'Bot', version: '1.0.0', description: '', author: 'a', license: 'MIT', permissions: ['channel'], kind: 'fynvra', host: { main: 'dist/main.mjs' }, ...manifest }),
+  );
+}
+const paths = (dir) => collectFiles(dir).files.map((f) => f.path);
+
+test('fynvra 类 + official 通过，不要求是 pi 包', () => {
+  const dir = join(tmp, 'fy-ok');
+  makeFynvraPlugin(dir);
+  const { manifest, pkg } = checkPluginRoot(dir, 'com.fynvra.bot', '1.0.0', 'official');
+  assert.equal(pkg, null);
+  checkHostMain(manifest, paths(dir));
+});
+
+test('fynvra 类 + reviewed 被拒', () => {
+  const dir = join(tmp, 'fy-reviewed');
+  makeFynvraPlugin(dir);
+  assert.throws(() => checkPluginRoot(dir, 'com.fynvra.bot', '1.0.0', 'reviewed'), /Fynvra 插件目前只接受官方插件/);
+});
+
+test('host.main 缺失、越界、扩展名不对或文件不存在被拒', () => {
+  const cases = [{ host: undefined }, { host: { main: '../main.mjs' } }, { host: { main: 'dist/main.ts' } }];
+  cases.forEach((m, i) => {
+    const dir = join(tmp, `fy-bad-${i}`);
+    makeFynvraPlugin(dir, m);
+    assert.throws(() => checkPluginRoot(dir, 'com.fynvra.bot', '1.0.0', 'official'), /host/);
+  });
+  const dir = join(tmp, 'fy-missing');
+  makeFynvraPlugin(dir, { host: { main: 'dist/other.js' } });
+  const { manifest } = checkPluginRoot(dir, 'com.fynvra.bot', '1.0.0', 'official');
+  assert.throws(() => checkHostMain(manifest, paths(dir)), /不在插件包里/);
+});
+
+test('pi 类不检查 host.main，同一插件各版本 kind 必须一致', () => {
+  checkHostMain({ permissions: [] }, []);
+  assert.equal(pluginKind('com.example.demo', ['pi', 'pi']), 'pi');
+  assert.throws(() => pluginKind('com.example.demo', ['pi', 'fynvra']), /kind 不一致/);
 });
