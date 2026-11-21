@@ -61,6 +61,15 @@ export interface TgMessage {
   text?: string;
   /** 外部数据，使用前逐项收窄（见 parseBotMention） */
   entities?: { type: string; offset: number; length: number }[];
+  /** 图片、文件等消息的配文与其中的 entities（外部数据，同上收窄） */
+  caption?: string;
+  caption_entities?: { type: string; offset: number; length: number }[];
+  /** 附件只用来判断有无与计数，不下载 */
+  photo?: unknown[];
+  document?: { mime_type?: string; file_name?: string };
+  video?: unknown;
+  animation?: unknown;
+  sticker?: unknown;
   reply_to_message?: { message_id: number; from?: TgUser };
   migrate_to_chat_id?: number;
   migrate_from_chat_id?: number;

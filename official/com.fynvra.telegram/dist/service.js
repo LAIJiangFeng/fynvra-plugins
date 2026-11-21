@@ -16,6 +16,18 @@ const BACKOFF_START_MS = 3_000;
 const BACKOFF_MAX_MS = 60_000;
 const HOUR_MS = 60 * 60_000;
 const ITEM_TEXT_MAX = 4_000;
+/** 被识别为反馈但只有附件、没有文字时的正文 */
+const ATTACHMENT_ONLY_TEXT = '（只发了图片，没有文字）';
+/** 反馈附件数：photo 算 1 张，document、video、animation 各算 1 个；sticker 不算 */
+export function countAttachments(message) {
+    const present = (value) => value !== undefined && value !== null;
+    const photo = Array.isArray(message.photo) && message.photo.length > 0 ? 1 : 0;
+    // 动图消息同时带 document 字段，不重复计数
+    const document = present(message.document) && !present(message.animation) ? 1 : 0;
+    const video = present(message.video) ? 1 : 0;
+    const animation = present(message.animation) ? 1 : 0;
+    return photo + document + video + animation;
+}
 /** 宿主 channel.createSession 的标题上限 */
 const SESSION_TITLE_MAX = 200;
 /** 还在分诊阶段、回复它就是对这张卡片的追问回复的状态；其余状态的卡片被回复时按新反馈处理 */
@@ -329,6 +341,7 @@ export function createTelegramService(deps) {
                 sender: item.sender,
                 messageIds: item.messageIds,
                 text: item.texts.join('\n'),
+                attachments: item.attachments,
             });
             // 先登记在途条目：triage_report 可能在 prompt 返回前就到
             inflight.set(sessionId, { ...item, reported: false });
@@ -475,9 +488,15 @@ export function createTelegramService(deps) {
         if (!group.active)
             return;
         const from = message.from;
-        const text = message.text;
-        if (!from || from.is_bot || typeof text !== 'string')
-            return; // 只取文字
+        if (!from || from.is_bot)
+            return;
+        // 图片、文件消息的文字与 @ 在 caption / caption_entities 里
+        const rawText = message.text ?? message.caption;
+        const text = typeof rawText === 'string' ? rawText : '';
+        const entities = message.entities ?? message.caption_entities;
+        const attachments = countAttachments(message);
+        if (!text && attachments === 0)
+            return;
         const repliedId = message.reply_to_message?.from?.id === bot.id
             ? message.reply_to_message.message_id
             : undefined;
@@ -496,8 +515,10 @@ export function createTelegramService(deps) {
             // /bug[@bot] 优先，其次 @本 bot；其余消息丢弃
             body =
                 parseBugCommand(text, bot.username) ??
-                    parseBotMention(text, message.entities, bot.username);
+                    parseBotMention(text, entities, bot.username);
         }
+        if (body === '' && attachments > 0)
+            body = ATTACHMENT_ONLY_TEXT;
         if (!body)
             return;
         const time = message.date * 1000;
@@ -519,6 +540,7 @@ export function createTelegramService(deps) {
             // 同一人 3 秒内连续发的合成一条
             last.texts.push(body.slice(0, ITEM_TEXT_MAX));
             last.messageIds.push(message.message_id);
+            last.attachments += attachments;
             last.lastDate = time;
             last.readyAt = now() + debounceMs;
         }
@@ -531,6 +553,7 @@ export function createTelegramService(deps) {
                 messageIds: [message.message_id],
                 replyTo: message.message_id,
                 texts: [body.slice(0, ITEM_TEXT_MAX)],
+                attachments,
                 lastDate: time,
                 readyAt: now() + debounceMs,
             });

@@ -265,6 +265,88 @@ describe('准入', () => {
     assert.deepEqual(bodies, ['页面白屏', '页面白屏', '点保存 没反应', '命令形式', '回复形式']);
   });
 
+  it('图片/文件：配文 @bot、/bug@bot、回复 bot 只发图入队并带附件说明；纯图与 sticker 不入队', async () => {
+    const h = harness();
+    await h.service.start();
+    const photo = { photo: [{ file_id: 'a' }, { file_id: 'b' }] };
+    // 表情占 2 个 UTF-16 单位，校验 caption_entities 按 UTF-16 偏移解析
+    const caption = '📷截图 @fyn_bot 白屏了';
+    const withCaption = (fromId, text, extra = {}) =>
+      message(CHAT_A, fromId, undefined, {
+        caption: text,
+        caption_entities: mentions(text).entities,
+        ...extra,
+      });
+    const updates = [
+      withCaption(50, caption, photo),
+      withCaption(51, '/bug@fyn_bot 命令配图', photo),
+      message(CHAT_A, 52, undefined, {
+        ...photo,
+        reply_to_message: { message_id: 1, from: { id: BOT_ID } },
+      }),
+      message(CHAT_A, 53, undefined, photo),
+      withCaption(54, '日志 @fyn_bot', { document: { file_name: 'log.txt' } }),
+      message(CHAT_A, 55, undefined, {
+        sticker: { file_id: 's' },
+        reply_to_message: { message_id: 1, from: { id: BOT_ID } },
+      }),
+      withCaption(56, '贴纸 @fyn_bot 配文', { sticker: { file_id: 's' } }),
+    ];
+    await deliver(h, updates, 1);
+    for (let i = 1; i < 5; i += 1) {
+      await h.report('sA', question);
+      h.settle('sA');
+      await waitFor(() => assert.equal(h.prompts.length, i + 1));
+    }
+    await h.report('sA', question);
+    h.settle('sA');
+    await tick(30);
+    const texts = h.prompts.map((p) => p.text);
+    const bodies = texts.map((t) => t.split('消息正文：\n')[1]?.split('\n')[0]);
+    assert.deepEqual(bodies, [
+      '📷截图 白屏了',
+      '命令配图',
+      '（只发了图片，没有文字）',
+      '日志',
+      '贴纸 配文',
+    ]);
+    const note = '[附件：图片/文件 1 个，Fynvra 不查看附件内容]';
+    for (const text of texts.slice(0, 4)) {
+      // 附件说明是可信元数据：在 </untrusted-content> 之后
+      const [inside, outside] = text.split('</untrusted-content>');
+      assert.ok(outside.includes(note));
+      assert.ok(!inside.includes(note));
+      assert.match(outside, /请对方用文字描述/);
+    }
+    // sticker 不算附件
+    assert.doesNotMatch(texts[4], /附件：/);
+  });
+
+  it('同一人合并的多条消息附件数累加', async () => {
+    const h = harness();
+    await h.service.start();
+    const text = '@fyn_bot 两张图';
+    await deliver(
+      h,
+      [
+        message(CHAT_A, 60, undefined, {
+          caption: text,
+          caption_entities: mentions(text).entities,
+          photo: [{}],
+          date: 1_000,
+        }),
+        message(CHAT_A, 60, undefined, {
+          caption: '@fyn_bot 视频',
+          caption_entities: mentions('@fyn_bot 视频').entities,
+          video: {},
+          date: 1_001,
+        }),
+      ],
+      1
+    );
+    assert.match(h.prompts[0].text, /\[附件：图片\/文件 2 个/);
+  });
+
   it('未允许的群收到 @ 消息：记为候选，不入队', async () => {
     const h = harness();
     await h.service.start();

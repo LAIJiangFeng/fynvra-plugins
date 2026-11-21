@@ -35,9 +35,14 @@ export interface TriageItemInput {
   sender: string;
   messageIds: number[];
   text: string;
+  /** 附件个数（插件统计，可信元数据）；缺省或 0 表示没有 */
+  attachments?: number;
 }
 
-/** 投给 triage 会话的正文：说明在 `<untrusted-content>` 之外，外部文本全在里面并转义 */
+/**
+ * 投给 triage 会话的正文：说明在 `<untrusted-content>` 之外，外部文本全在里面并转义。
+ * 附件说明是插件生成的可信元数据，放在标签之外的末尾，避免与用户可伪造的同样文字混淆。
+ */
 export function triagePrompt(item: TriageItemInput): string {
   const head = item.card
     ? `卡片 #${item.card.id}（追问回复）`
@@ -69,6 +74,13 @@ export function triagePrompt(item: TriageItemInput): string {
     '<untrusted-content source="telegram">',
     body,
     '</untrusted-content>',
+    ...(item.attachments
+      ? [
+          '',
+          `[附件：图片/文件 ${item.attachments} 个，Fynvra 不查看附件内容]`,
+          '用户可能附了图片或文件，你看不到它们的内容；如果定位问题需要，请在 reply 里请对方用文字描述看到的现象，或粘贴报错原文。',
+        ]
+      : []),
   ].join('\n');
 }
 
