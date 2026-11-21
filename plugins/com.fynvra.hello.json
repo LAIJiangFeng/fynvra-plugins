@@ -1,0 +1,20 @@
+{
+  "id": "com.fynvra.hello",
+  "name": "Hello Fynvra",
+  "description": "官方示例插件：注册一个 hello_fynvra 工具，返回问候语和当前时间。可用来确认插件市场安装流程正常。",
+  "author": "Fynvra",
+  "homepage": "https://github.com/LAIJiangFeng/fynvra-plugins/tree/main/official/com.fynvra.hello",
+  "repository": "https://github.com/LAIJiangFeng/fynvra-plugins",
+  "license": "Apache-2.0",
+  "category": "other",
+  "tags": ["example", "official"],
+  "tier": "official",
+  "versions": [
+    {
+      "version": "0.1.0",
+      "commit": "7c2ea00a887c3f9bb93f50a9d83302b5a906137f",
+      "path": "official/com.fynvra.hello",
+      "changelog": "首个版本：提供 hello_fynvra 工具。"
+    }
+  ]
+}
