@@ -1,0 +1,11 @@
+{
+  "name": "fynvra-plugin-hello",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fynvra 官方示例插件：注册 hello_fynvra 工具",
+  "keywords": ["pi-package"],
+  "license": "Apache-2.0",
+  "pi": {
+    "extensions": ["./extensions/hello.ts"]
+  }
+}
