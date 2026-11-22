@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        提交前请先阅读 [CONTRIBUTING.md](https://github.com/LAIJiangFeng/fynvra-plugins/blob/main/CONTRIBUTING.md)，确认插件根目录有 `fynvra-plugin.json`，并已在 Fynvra 中用「添加本地插件」试用过。
+        提交前请先阅读 [CONTRIBUTING.md](https://github.com/LAIJiangFeng/fynvra-plugins/blob/main/CONTRIBUTING.md)，确认插件根目录有 `fynvra-plugin.json`，并已在 Fynvra 中试用过（PI 插件用「添加本地插件」；Fynvra 插件用开发版的「添加本地 Fynvra 插件（开发）」）。
   - type: input
     id: repository
     attributes:
@@ -20,6 +20,16 @@ body:
     attributes:
       label: 提交 SHA
       description: 要发布的那次提交的完整 40 位 SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 插件类别
+      description: 与 fynvra-plugin.json 中的 kind 一致（缺省为 PI 插件）
+      options:
+        - PI 插件
+        - Fynvra 插件
     validations:
       required: true
   - type: input
@@ -44,14 +54,25 @@ body:
   - type: checkboxes
     id: permissions
     attributes:
-      label: 权限
-      description: 勾选插件实际用到的权限（须与 fynvra-plugin.json 一致）
+      label: 权限（PI 插件）
+      description: 只有 PI 插件勾这一组；勾选实际用到的权限（须与 fynvra-plugin.json 一致）
       options:
         - label: network（访问网络）
         - label: filesystem（读写工作区以外的文件）
         - label: shell（执行命令）
         - label: env（读取环境变量）
         - label: model-keys（使用模型密钥）
+  - type: checkboxes
+    id: fynvra-permissions
+    attributes:
+      label: 权限（Fynvra 插件）
+      description: 只有 Fynvra 插件勾这一组；勾选实际用到的权限（须与 fynvra-plugin.json 一致）
+      options:
+        - label: notifications（发送系统通知）
+        - label: network（访问网络）
+        - label: workspaces（列出工作区）
+        - label: channel（创建并驱动本插件的会话，审核从严）
+        - label: ui（在设置页渲染界面）
   - type: textarea
     id: permission-reason
     attributes:

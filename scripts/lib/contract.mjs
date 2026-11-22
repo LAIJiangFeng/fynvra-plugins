@@ -20,7 +20,9 @@ export const PERMISSIONS_BY_KIND = {
   fynvra: ['notifications', 'network', 'workspaces', 'channel', 'ui'],
 };
 export const PERMISSIONS = PERMISSIONS_BY_KIND.pi;
-export const FYNVRA_OFFICIAL_ONLY = 'Fynvra 插件目前只接受官方插件';
+// com.fynvra.* 是官方保留的命名空间，只能用于 official 插件
+export const isReservedId = (id) => typeof id === 'string' && id.startsWith('com.fynvra.');
+export const RESERVED_ID_MSG = 'id 以 com.fynvra. 开头的是官方保留命名空间，tier 必须是 official';
 
 // 清单缺省 kind 时按 pi 处理
 export const manifestKind = (m) => m?.kind ?? 'pi';
@@ -130,6 +132,7 @@ export function validateEntry(entry, fileName) {
   checkStr(errs, `${where}.id`, entry.id, 1, 64, ID_RE);
   if (fileName !== undefined && fileName !== `${entry.id}.json`) errs.push(`${where}: 文件名必须是 "${entry.id}.json"`);
   checkCommon(errs, where, entry);
+  if (isReservedId(entry.id) && entry.tier !== 'official') errs.push(`${where}.tier: ${RESERVED_ID_MSG}`);
 
   if (!Array.isArray(entry.versions) || entry.versions.length === 0) {
     errs.push(`${where}.versions: 至少需要 1 个版本`);
@@ -240,7 +243,7 @@ export function validateIndex(idx) {
       ids.add(p.id);
       checkCommon(errs, w, p);
       if (!KINDS.includes(p.kind)) errs.push(`${w}.kind: 必须是 ${KINDS.join(' 或 ')}`);
-      if (p.kind === 'fynvra' && p.tier !== 'official') errs.push(`${w}.tier: ${FYNVRA_OFFICIAL_ONLY}`);
+      if (isReservedId(p.id) && p.tier !== 'official') errs.push(`${w}.tier: ${RESERVED_ID_MSG}`);
       if (!Array.isArray(p.versions) || p.versions.length === 0) return errs.push(`${w}.versions: 至少需要 1 个版本`);
       const vs = new Set();
       p.versions.forEach((v, j) => {

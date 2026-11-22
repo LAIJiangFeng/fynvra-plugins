@@ -1,7 +1,7 @@
 // 插件源码检查：fynvra-plugin.json 与条目一致、按 kind 检查（pi 包 / host.main）；以及已发布版本的不可变检查。
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { FYNVRA_OFFICIAL_ONLY, manifestKind, validateManifest } from './contract.mjs';
+import { RESERVED_ID_MSG, isReservedId, manifestKind, validateManifest } from './contract.mjs';
 
 function readJson(file, label) {
   try {
@@ -11,10 +11,10 @@ function readJson(file, label) {
   }
 }
 
-// 校验 fynvra-plugin.json 内容并核对 id/version；fynvra 类还要求条目 tier 为 official；返回清单对象
+// 校验 fynvra-plugin.json 内容并核对 id/version；com.fynvra.* 还要求条目 tier 为 official；返回清单对象
 export function checkManifest(manifest, entryId, version, tier) {
   const errs = validateManifest(manifest);
-  if (manifestKind(manifest) === 'fynvra' && tier !== 'official') errs.push(`${entryId}: ${FYNVRA_OFFICIAL_ONLY}（条目 tier 是 ${tier}）`);
+  if (isReservedId(entryId) && tier !== 'official') errs.push(`${entryId}: ${RESERVED_ID_MSG}（条目 tier 是 ${tier}）`);
   if (manifest && manifest.id !== entryId) errs.push(`fynvra-plugin.json.id 是 "${manifest.id}"，与条目 id "${entryId}" 不一致`);
   if (manifest && manifest.version !== version) errs.push(`fynvra-plugin.json.version 是 "${manifest.version}"，与条目版本 "${version}" 不一致`);
   if (errs.length) throw new Error(errs.join('\n'));

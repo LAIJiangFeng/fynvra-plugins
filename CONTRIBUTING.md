@@ -6,10 +6,10 @@
 
 | 类别 | 清单 `kind` | 运行方式 | 谁能提交 |
 | --- | --- | --- | --- |
-| PI 插件 | `"pi"`（缺省） | pi 扩展或 pi 包，在对话里提供工具、命令等 | 所有人 |
-| Fynvra 插件 | `"fynvra"` | 在 Fynvra 后台独立进程常驻运行，只能通过宿主 API 做事 | 目前只有维护者 |
+| PI 插件 | `"pi"`（缺省） | pi 扩展或 pi 包，在对话里提供工具、命令等 | 所有人（需审核） |
+| Fynvra 插件 | `"fynvra"` | 在 Fynvra 后台独立进程常驻运行，只能通过宿主 API 做事 | 所有人（需审核） |
 
-**Fynvra 插件目前只由维护者发布**：条目 `tier` 不是 `official` 时构建直接失败（「Fynvra 插件目前只接受官方插件」）。第三方暂时只能提交 PI 插件，下文除第 1.1 节外都是说 PI 插件。
+两类插件的差别：PI 插件只在对话里被调用时运行；Fynvra 插件在后台常驻运行，即使用户没在对话也会持续工作，所以审核会更严（见第 5 节）。第三方插件审核通过后都以 `tier: "reviewed"` 上架。下文除第 1.1 节外的示例以 PI 插件为主。
 
 ## 1. 写一个插件
 
@@ -69,19 +69,19 @@ LICENSE
 
 `id` 和 `version` 必须与注册表条目一致；索引中的权限和 engines 以这个文件为准。
 
-### 1.1 Fynvra 插件（仅维护者）
+### 1.1 Fynvra 插件
 
 Fynvra 插件不需要是 pi 包（不检查 `pi.extensions`，`package.json` 可选，只在有 `dependencies` 时用来安装依赖）。清单示例：
 
 ```json
 {
   "schemaVersion": 1,
-  "id": "com.fynvra.example",
+  "id": "io.github.you.example",
   "name": "示例",
   "version": "1.0.0",
   "description": "……",
-  "author": "Fynvra",
-  "license": "Apache-2.0",
+  "author": "你的名字",
+  "license": "MIT",
   "kind": "fynvra",
   "host": { "main": "dist/main.mjs" },
   "permissions": ["notifications", "network"]
@@ -90,7 +90,9 @@ Fynvra 插件不需要是 pi 包（不检查 `pi.extensions`，`package.json` �
 
 - `host.main` 是入口文件，必须是 **ESM 格式的 JS**：包内相对路径，只用 `/` 分隔，不能含 `..`、反斜杠或盘符，扩展名 `.js` 或 `.mjs`，并且该文件必须真实打进插件包。
 - **构建时不会执行任何脚本**（不跑 `npm run build`、不编译 TypeScript）。作者要把构建好的 JS 一起提交到仓库，并且**不能压缩或混淆**，方便审核。
-- 条目 `tier` 必须是 `official`，同一插件的所有版本 `kind` 必须相同。
+- 条目 `tier`：第三方填 `reviewed`（`com.fynvra.*` 是官方保留命名空间，只能是 `official`）。同一插件的所有版本 `kind` 必须相同。
+- 宿主 API 的类型定义可以参考 [`official/com.fynvra.telegram/src/types/appPluginApi.ts`](official/com.fynvra.telegram/src/types/appPluginApi.ts)，[Telegram 插件](official/com.fynvra.telegram/) 本身就是一份完整的参考实现。
+- 本地试用必须用 Fynvra **开发版**（从源码 `pnpm dev` 启动），在「设置 → 插件 → 添加本地 Fynvra 插件（开发）」里选择插件目录。正式安装版不能加载本地 Fynvra 插件。
 
 ### 权限含义
 
@@ -189,6 +191,13 @@ Fork 本仓库，新增 `plugins/<id>.json`：
 - **不越界**：不读取 `~/.ssh`、浏览器数据、其他应用的凭据；不修改 Fynvra 或 pi 的配置。
 - **许可证明确**：仓库有 LICENSE，且允许分发。
 - **能用**：维护者会安装试用，明显不可用的插件会被退回。
+
+**Fynvra 插件的额外要求**（它在后台常驻运行，审核更严）：
+
+- **写清网络访问**：README 里列出插件会访问的所有网络地址，以及为什么要访问。
+- **`channel` 权限从严**：只给「把外部消息（聊天、反馈等）接进 Fynvra 会话」的插件，审核时重点检查。这个权限能在用户的 git 工作区里创建受限会话、驱动它们修复问题并开 PR。
+- **不得后台定时上报数据**。
+- **卸载时不留常驻进程**：插件停用或卸载后，不能留下任何还在运行的进程。
 
 审核不通过时会在 PR 中说明原因。
 

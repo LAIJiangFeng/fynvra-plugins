@@ -61,7 +61,7 @@ scripts/               validate / build / scan / publish / verify / gen-key
 
 ## 提交插件
 
-请看 [CONTRIBUTING.md](CONTRIBUTING.md)。
+PI 插件和 Fynvra 插件都接受第三方提交，审核通过后上架。写法、提交方式和审核标准见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 
