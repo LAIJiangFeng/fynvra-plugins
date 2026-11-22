@@ -1,0 +1,20 @@
+{
+  "id": "com.fynvra.feishu",
+  "name": "飞书群反馈值班",
+  "description": "在飞书群里 @机器人 或私聊机器人反馈问题：自动分诊、追问，定位到原因的 bug 由值班会话修复并开 PR，新功能需你在设置页采纳。回复先经过 Fynvra 的出站过滤。",
+  "author": "Fynvra",
+  "homepage": "https://github.com/LAIJiangFeng/fynvra-plugins/tree/main/official/com.fynvra.feishu",
+  "repository": "https://github.com/LAIJiangFeng/fynvra-plugins",
+  "license": "Apache-2.0",
+  "category": "integration",
+  "tags": ["feishu", "lark", "feedback", "official"],
+  "tier": "official",
+  "versions": [
+    {
+      "version": "0.1.0",
+      "commit": "25f3b4e44ee185c981b2db1920f1446febdf5e85",
+      "path": "official/com.fynvra.feishu",
+      "changelog": "首个版本：飞书群聊和私聊反馈值班"
+    }
+  ]
+}
