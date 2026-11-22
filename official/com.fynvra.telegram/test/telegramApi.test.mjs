@@ -66,6 +66,19 @@ describe('createHttpsPost 守卫', () => {
 });
 
 describe('telegram api', () => {
+  it('getMe 解析 can_read_all_group_messages；缺省或非 true 时按隐私模式开启', async () => {
+    const user = { id: 42, is_bot: true, username: 'fyn_bot' };
+    const { http } = fakeHttp([
+      { status: 200, body: { ok: true, result: { ...user, can_read_all_group_messages: true } } },
+      { status: 200, body: { ok: true, result: { ...user, can_read_all_group_messages: false } } },
+      { status: 200, body: { ok: true, result: { ...user, can_read_all_group_messages: 'yes' } } },
+      { status: 200, body: { ok: true, result: user } },
+    ]);
+    const api = createTelegramApi({ http });
+    assert.deepEqual(await api.getMe(TOKEN), { id: 42, username: 'fyn_bot', canReadAll: true });
+    for (let i = 0; i < 3; i += 1) assert.equal((await api.getMe(TOKEN)).canReadAll, false);
+  });
+
   it('getUpdates 用长轮询并只收 message 与 my_chat_member', async () => {
     const { http, calls } = fakeHttp([{ status: 200, body: { ok: true, result: [{ update_id: 5 }] } }]);
     const api = createTelegramApi({ http });

@@ -52,6 +52,10 @@ describe('telegram content', () => {
     assert.match(text, /本条目调用 triage_report 恰好一次/);
     assert.equal(text.match(/<\/untrusted-content>/g).length, 1);
     assert.ok(text.trim().endsWith('</untrusted-content>'));
+    // 隐私说明是插件写的，在标签之外
+    const outside = text.split('<untrusted-content')[0];
+    assert.match(outside, /title、summary、evidence 不要写群成员的名字或昵称，用「群成员」或「用户」代替/);
+    assert.match(outside, /不要复述截图或附件里的链接、凭证、个人信息/);
   });
 
   it('值班正文与 PR 说明段', () => {
@@ -59,11 +63,13 @@ describe('telegram content', () => {
     assert.match(prompt, /card #4/);
     assert.match(prompt, /maintainer approved/);
     assert.match(prompt, /open_pull_request/);
-    assert.ok(
-      pullRequestSection({ id: 4, title: 't', summary: 's' }).includes(
-        '## 来源\n\nTelegram 群反馈（卡片 #4）'
-      )
+    assert.match(
+      prompt.split('<untrusted-content')[0],
+      /Never put the reporter's name or nickname, Telegram group information, any personal information, or anything shown in screenshots into commit messages, code comments or pull request text/
     );
+    const section = pullRequestSection({ id: 4, title: '标题', summary: 'Ycvu 反馈的摘要' });
+    assert.equal(section, '## 问题\n\n标题\n\n## 来源\n\nTelegram 群反馈（卡片 #4）');
+    assert.doesNotMatch(section, /摘要|Ycvu/);
   });
 
   it('三问评估解析', () => {

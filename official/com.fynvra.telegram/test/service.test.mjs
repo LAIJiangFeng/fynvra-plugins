@@ -743,6 +743,26 @@ describe('值班、卡片关联、PR 说明与 PR 通知', () => {
     assert.equal(h.state.noteCalls.filter((c) => c.taskId === 't1').length, 1);
   });
 
+  it('PR 说明不带分诊摘要：摘要里的群成员昵称不会写进公开 PR', async () => {
+    const h = harness();
+    await h.service.start();
+    await deliver(h, [message(CHAT_A, 1, '/bug 登录失败')], 1);
+    await h.report('sA', {
+      kind: 'bug',
+      title: '登录链接跳转失败',
+      summary: 'Ycvu 反馈：截图里有带登录 token 的链接',
+      reply: '已定位',
+      evidence: 'e',
+    });
+    await waitFor(() => assert.ok(h.prompts.some((p) => p.sessionId === 'p1')));
+    h.state.snapshot.runs.push({ id: 'r1', coordinatorSessionId: 'p1' });
+    h.state.snapshot.tasks.push({ id: 't1', runId: 'r1', title: 'fix', status: 'todo' });
+    h.host.emit('channel.orchestrationChanged', { workspaceId: 'ws1' });
+    await waitFor(() => assert.ok(h.state.notes.has('t1')));
+    assert.match(h.state.notes.get('t1'), /登录链接跳转失败/);
+    for (const call of h.state.noteCalls) assert.doesNotMatch(call.text, /Ycvu|截图/);
+  });
+
   it('卡片内容含密钥时 PR 说明只写来源', async () => {
     const h = harness();
     await fixingCard(h, `标题 ${KNOWN_KEY}`);

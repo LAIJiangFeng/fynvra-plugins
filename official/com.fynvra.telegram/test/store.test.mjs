@@ -69,6 +69,19 @@ describe('telegram store', () => {
     assert.equal((await store.load()).token, undefined);
   });
 
+  it('bot.canReadAll 写入再读回后还在；非布尔值丢弃', async () => {
+    const host = fakeApi();
+    const store = createTelegramStore(host.api);
+    for (const canReadAll of [true, false]) {
+      await store.save({ ...emptyTelegramData(), bot: { id: 42, username: 'fyn_bot', canReadAll } });
+      assert.deepEqual((await store.load()).bot, { id: 42, username: 'fyn_bot', canReadAll });
+    }
+    assert.deepEqual(parseTelegramData({ bot: { id: 42, username: 'fyn_bot', canReadAll: 'yes' } }).bot, {
+      id: 42,
+      username: 'fyn_bot',
+    });
+  });
+
   it('串行写，按调用顺序落盘', async () => {
     const host = fakeApi();
     const store = createTelegramStore(host.api);
