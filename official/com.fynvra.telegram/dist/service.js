@@ -100,6 +100,13 @@ export function createTelegramService(deps) {
     const statuses = new Map();
     /** 已写过 PR 说明的任务（进程内；重启后再写一次无害） */
     const notedTasks = new Set();
+    /**
+     * 换模型时正在运行的会话，下一次投递前补上。
+     * shortcut: 只在内存里，重启后丢失（会话继续用旧模型，用户重选一次即可），有人反馈再落盘
+     */
+    const pendingModel = new Set();
+    /** 所选模型不可用、已改用默认（设置页提示用） */
+    let modelFallback = false;
     const safe = (text) => redactToken(text, data.token);
     const warn = (message) => api.log('warn', safe(message));
     const notify = (title, body) => {
@@ -335,13 +342,57 @@ export function createTelegramService(deps) {
     };
     // ---------- 会话 ----------
     const createSession = async (workspaceId, profile, title) => {
-        const { sessionId } = await api.channel.createSession({
-            workspaceId,
-            profile,
-            title: sessionTitle(title),
-        });
+        const base = { workspaceId, profile, title: sessionTitle(title) };
+        const model = modelOf(profile);
+        let sessionId;
+        if (!model) {
+            // 没选模型时不带 model：旧版 Fynvra 不认这个参数
+            ({ sessionId } = await api.channel.createSession(base));
+        }
+        else {
+            try {
+                ({ sessionId } = await api.channel.createSession({ ...base, model }));
+            }
+            catch (error) {
+                warn(`所选模型不可用（${model.providerId} / ${model.modelId}），改用默认模型建会话：${errorMessage(error)}`);
+                ({ sessionId } = await api.channel.createSession(base));
+                modelFallback = true;
+                emit();
+            }
+        }
         statuses.set(sessionId, 'idle');
         return sessionId;
+    };
+    const modelOf = (profile) => profile === 'triage' ? data.triageModel : data.dutyModel;
+    /** 给已有会话换成当前选择的模型；运行中的记成待应用 */
+    const applyModel = async (sessionId, profile) => {
+        pendingModel.delete(sessionId);
+        // 旧版 Fynvra 没有这个方法
+        if (typeof api.channel.setSessionModel !== 'function')
+            return;
+        const model = modelOf(profile) ?? null;
+        try {
+            await api.channel.setSessionModel({ sessionId, model });
+        }
+        catch (error) {
+            const status = await statusOf(sessionId).catch(() => undefined);
+            if (isBusy(status)) {
+                pendingModel.add(sessionId);
+                return;
+            }
+            if (status === 'archived' || status === 'missing')
+                return;
+            warn(`给会话 ${sessionId} 换模型失败：${errorMessage(error)}`);
+            if (model) {
+                modelFallback = true;
+                emit();
+            }
+        }
+    };
+    /** 投递前补上换模型时因运行中没换成的 */
+    const applyPendingModel = async (sessionId, profile) => {
+        if (pendingModel.has(sessionId))
+            await applyModel(sessionId, profile);
     };
     /** 「群 × 项目」的分诊会话：没有或已失效时创建 */
     const ensureTriageSession = async (group, workspaceId) => {
@@ -524,6 +575,7 @@ export function createTelegramService(deps) {
                 rejected: rejectionSummary([...item.files.rejected, ...downloaded.rejected]),
             });
             // 先登记在途条目：triage_report 可能在 prompt 返回前就到
+            await applyPendingModel(sessionId, 'triage');
             const pending = { ...item, workspaceId, reported: false };
             inflight.set(sessionId, pending);
             let delivered = false;
@@ -1165,6 +1217,7 @@ export function createTelegramService(deps) {
             const sessionId = await ensureDutySession(workspaceId);
             if (!sessionId || (await statusOf(sessionId)) !== 'idle')
                 return;
+            await applyPendingModel(sessionId, 'restricted');
             await refreshCheckout(workspaceId);
             const known = await snapshotOf(workspaceId)
                 .then((snapshot) => coordinatorTaskIds(snapshot, sessionId))
@@ -1369,6 +1422,9 @@ export function createTelegramService(deps) {
             updatedAt: card.updatedAt,
         })),
         rateLimitPerHour: data.rateLimitPerHour,
+        ...(data.triageModel ? { triageModel: { ...data.triageModel } } : {}),
+        ...(data.dutyModel ? { dutyModel: { ...data.dutyModel } } : {}),
+        modelFallback,
     });
     /** 设置页改动：落盘成功后通知重画 */
     const commitOrError = async () => {
@@ -1665,6 +1721,26 @@ export function createTelegramService(deps) {
             if (saved.ok)
                 emit();
             return saved;
+        },
+        async setModel(kind, model) {
+            const key = kind === 'triage' ? 'triageModel' : 'dutyModel';
+            if (model)
+                data[key] = { providerId: model.providerId, modelId: model.modelId };
+            else
+                delete data[key];
+            modelFallback = false;
+            const saved = await saveOrError();
+            emit();
+            if (!saved.ok)
+                return saved;
+            // 只换模型不重建会话：重建会丢掉分诊上下文
+            const sessionIds = kind === 'triage'
+                ? data.groups.flatMap((group) => Object.values(group.triageSessions))
+                : Object.values(data.workspaces).flatMap((entry) => entry.dutySessionId ?? []);
+            const profile = kind === 'triage' ? 'triage' : 'restricted';
+            for (const sessionId of new Set(sessionIds))
+                await applyModel(sessionId, profile);
+            return { ok: true };
         },
         onChange(listener) {
             listeners.add(listener);

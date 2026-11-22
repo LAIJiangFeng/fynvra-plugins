@@ -8,7 +8,7 @@ import type {
 } from './model.js';
 import { TELEGRAM_RATE_LIMIT_MAX } from './model.js';
 import type { ActionResult, TelegramService } from './service.js';
-import type { PluginWorkspace } from './types/appPluginApi.js';
+import type { ChannelModel, ChannelModelRef, PluginWorkspace } from './types/appPluginApi.js';
 import type { PluginUi, UiListItem, UiNode } from './types/appPluginUi.js';
 import { httpsUrl, isUiId } from './types/appPluginUi.js';
 import { asRecord } from './util.js';
@@ -26,6 +26,8 @@ export const ACTIONS = {
   setPrimary: 'project.primary',
   saveNote: 'project.note',
   saveRateLimit: 'rateLimit.save',
+  triageModel: 'model.triage',
+  dutyModel: 'model.duty',
   approve: 'card.approve',
   reject: 'card.reject',
 } as const;
@@ -83,8 +85,108 @@ const NETWORK_HINT =
 
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
+/**
+ * 设置页能选的模型：旧版 Fynvra 不支持时 supported=false；
+ * models 为 null 表示这次没读到列表（不把已选的标成不可用）
+ */
+export type ModelChoices = { supported: false } | { supported: true; models: ChannelModel[] | null };
+
+/** 下拉里「默认」的值；模型的值都含 `/`，不会混淆 */
+export const DEFAULT_MODEL_VALUE = 'default';
+/** 下拉选项值的上限（UI 描述 v1） */
+const OPTION_VALUE_MAX = 200;
+
+/** 下拉选项的值：两段各自 encodeURIComponent（`/` 会被编码），再用 `/` 连起来 */
+export function modelValue(ref: ChannelModelRef): string {
+  return `${encodeURIComponent(ref.providerId)}/${encodeURIComponent(ref.modelId)}`;
+}
+
+/** 把下拉的值拆回模型；默认返回 null，非法返回 undefined */
+export function parseModelValue(value: unknown): ChannelModelRef | null | undefined {
+  if (value === DEFAULT_MODEL_VALUE) return null;
+  if (typeof value !== 'string') return undefined;
+  const parts = value.split('/');
+  if (parts.length !== 2) return undefined;
+  try {
+    const [providerId, modelId] = parts.map((part) => decodeURIComponent(part));
+    if (!providerId || !modelId || providerId.length > 200 || modelId.length > 200) return undefined;
+    return { providerId, modelId };
+  } catch {
+    return undefined;
+  }
+}
+
+const sameModel = (a: ChannelModelRef, b: ChannelModelRef) =>
+  a.providerId === b.providerId && a.modelId === b.modelId;
+
+function modelNodes(state: TelegramStateView, choices: ModelChoices): UiNode[] {
+  if (!choices.supported) {
+    return [{ type: 'text', text: '当前 Fynvra 版本不支持选择模型', tone: 'muted' }];
+  }
+  const listed = (choices.models ?? [])
+    // shortcut: 编码后超过 200 字符的模型不列出（id 极长才会碰到），有人遇到再改按序号编码
+    .filter((model) => modelValue(model).length <= OPTION_VALUE_MAX)
+    .slice(0, 198)
+    .map((model) => ({
+      value: modelValue(model),
+      label: clip(`${model.providerName} / ${model.label}`, 200),
+      ref: model,
+    }));
+  const nodes: UiNode[] = [];
+  let unavailable = false;
+  const select = (id: string, label: string, action: string, hint: string, chosen?: ChannelModelRef) => {
+    const options = [
+      { value: DEFAULT_MODEL_VALUE, label: '默认（跟随 Fynvra）' },
+      ...listed.map(({ value, label }) => ({ value, label })),
+    ];
+    if (chosen && !listed.some((option) => sameModel(option.ref, chosen))) {
+      // 已选的不在列表里：保留这一项；读到了列表才标「不可用」
+      const missing = choices.models !== null;
+      if (missing) unavailable = true;
+      options.push({
+        value: modelValue(chosen),
+        label: clip(`${chosen.providerId} / ${chosen.modelId}${missing ? '（不可用）' : ''}`, 200),
+      });
+    }
+    nodes.push(
+      {
+        type: 'field',
+        id,
+        label,
+        kind: 'select',
+        value: chosen ? modelValue(chosen) : DEFAULT_MODEL_VALUE,
+        options,
+        action,
+      },
+      { type: 'text', text: hint, tone: 'muted' }
+    );
+  };
+  select('triageModel', '分诊模型', ACTIONS.triageModel, '读群消息、追问、回复，建议用便宜快速的模型', state.triageModel);
+  select(
+    'dutyModel',
+    '值班模型',
+    ACTIONS.dutyModel,
+    '修复 bug 并开 PR（包括值班派出的修复任务），建议用强模型',
+    state.dutyModel
+  );
+  if (choices.models === null) {
+    nodes.push({ type: 'text', text: '暂时读不到模型列表', tone: 'warning' });
+  }
+  if (unavailable) {
+    nodes.push({ type: 'text', text: '所选模型不可用，新会话会改用默认模型', tone: 'warning' });
+  }
+  if (state.modelFallback) {
+    nodes.push({ type: 'text', text: '所选模型不可用，已改用默认', tone: 'warning' });
+  }
+  return nodes;
+}
+
 /** 生成整份设置页 */
-export function buildSettingsUi(state: TelegramStateView, workspaces: PluginWorkspace[]): PluginUi {
+export function buildSettingsUi(
+  state: TelegramStateView,
+  workspaces: PluginWorkspace[],
+  models: ModelChoices
+): PluginUi {
   const workspaceName = (id: string) =>
     workspaces.find((workspace) => workspace.id === id)?.name ?? '工作区已移除';
   const gitOptions = workspaces
@@ -293,6 +395,7 @@ export function buildSettingsUi(state: TelegramStateView, workspaces: PluginWork
           },
         ],
       },
+      { type: 'section', title: '模型', children: modelNodes(state, models) },
       {
         type: 'section',
         title: '待确认需求',
@@ -392,6 +495,13 @@ export async function handleUiAction(service: TelegramService, raw: unknown): Pr
     case ACTIONS.saveRateLimit: {
       const perHour = values.rateLimit;
       return service.setRateLimit(typeof perHour === 'number' ? perHour : Number.NaN);
+    }
+    case ACTIONS.triageModel:
+    case ACTIONS.dutyModel: {
+      const triage = action === ACTIONS.triageModel;
+      const model = parseModelValue(values[triage ? 'triageModel' : 'dutyModel']);
+      if (model === undefined) return { ok: false, error: '模型格式不对' };
+      return service.setModel(triage ? 'triage' : 'duty', model);
     }
     case ACTIONS.approve:
     case ACTIONS.reject: {

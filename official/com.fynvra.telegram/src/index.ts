@@ -7,8 +7,8 @@ import {
   type TelegramApi,
 } from './telegramApi.js';
 import type { FynvraPluginApi, Unsubscribe } from './types/appPluginApi.js';
-import { buildSettingsUi, handleUiAction } from './ui.js';
-import { errorMessage } from './util.js';
+import { buildSettingsUi, handleUiAction, type ModelChoices } from './ui.js';
+import { asRecord, errorMessage } from './util.js';
 
 /** 状态变化后合并多久再重新 render */
 export const RENDER_THROTTLE_MS = 500;
@@ -34,11 +34,39 @@ export async function startPlugin(
   let stopped = false;
   let lastWorkspaces = '';
 
+  /** 读可选的模型；旧版 Fynvra 没有 channel.models（或拒绝调用）时不支持 */
+  const loadModels = async (): Promise<ModelChoices> => {
+    if (typeof api.channel.models !== 'function') return { supported: false };
+    try {
+      const raw = asRecord(await api.channel.models())?.models;
+      const models = (Array.isArray(raw) ? raw : []).flatMap((item) => {
+        const m = asRecord(item);
+        const str = (v: unknown) => typeof v === 'string' && v.length > 0;
+        return m && str(m.providerId) && str(m.modelId)
+          ? [
+              {
+                providerId: m.providerId as string,
+                modelId: m.modelId as string,
+                providerName: str(m.providerName) ? (m.providerName as string) : (m.providerId as string),
+                label: str(m.label) ? (m.label as string) : (m.modelId as string),
+              },
+            ]
+          : [];
+      });
+      return { supported: true, models };
+    } catch (error) {
+      const message = errorMessage(error);
+      if (/method not allowed|permission required/.test(message)) return { supported: false };
+      api.log('warn', `读取模型列表失败：${message}`);
+      return { supported: true, models: null };
+    }
+  };
+
   const render = async () => {
     try {
-      const workspaces = await api.workspaces.list();
+      const [workspaces, models] = await Promise.all([api.workspaces.list(), loadModels()]);
       lastWorkspaces = JSON.stringify(workspaces);
-      await api.ui.render(buildSettingsUi(service.getState(), workspaces));
+      await api.ui.render(buildSettingsUi(service.getState(), workspaces, models));
     } catch (error) {
       api.log('warn', `设置页渲染失败：${errorMessage(error)}`);
     }

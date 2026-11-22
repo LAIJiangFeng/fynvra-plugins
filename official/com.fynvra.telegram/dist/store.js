@@ -140,6 +140,14 @@ function parseCard(raw) {
         card.prUrl = r.prUrl;
     return card;
 }
+const isModelId = (value) => typeof value === 'string' && value.length >= 1 && value.length <= 200;
+/** 模型引用：服务 id 与模型 id 各 1–200 字符；不合法时当作没选 */
+export function parseModelRef(raw) {
+    const r = asRecord(raw);
+    return r && isModelId(r.providerId) && isModelId(r.modelId)
+        ? { providerId: r.providerId, modelId: r.modelId }
+        : undefined;
+}
 function list(raw, parse) {
     return Array.isArray(raw) ? raw.flatMap((item) => parse(item) ?? []) : [];
 }
@@ -184,6 +192,12 @@ export function parseTelegramData(raw) {
     if (isTelegramRateLimit(r.rateLimitPerHour))
         data.rateLimitPerHour = r.rateLimitPerHour;
     data.legacyMigrated = r.legacyMigrated === true;
+    const triageModel = parseModelRef(r.triageModel);
+    if (triageModel)
+        data.triageModel = triageModel;
+    const dutyModel = parseModelRef(r.dutyModel);
+    if (dutyModel)
+        data.dutyModel = dutyModel;
     return data;
 }
 export function createTelegramStore(api) {

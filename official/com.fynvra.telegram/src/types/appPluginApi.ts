@@ -24,6 +24,18 @@ export type Unsubscribe = () => void;
 /** 渠道会话的档位：只读分诊 triage，或受限值班 restricted */
 export type ChannelProfile = 'triage' | 'restricted';
 
+/** 渠道会话用的模型引用：设置里的服务 id 与模型 id（各为 1–200 字符） */
+export interface ChannelModelRef {
+  providerId: string;
+  modelId: string;
+}
+
+/** channel.models() 的一项：只有显示用字段，不含 key、baseUrl 等配置；label 是显示名，没有时为 modelId */
+export interface ChannelModel extends ChannelModelRef {
+  providerName: string;
+  label: string;
+}
+
 /** 会话状态；已归档为 archived，会话已被用户删掉为 missing */
 export type ChannelSessionStatus =
   | 'idle'
@@ -80,7 +92,26 @@ export interface ChannelOrchestrationEvent {
   workspaceId: string;
 }
 
-/** 宿主调插件 `channel.report` 的入参：本插件 triage 会话里的 triage_report 等调用（input 未收窄） */
+/**
+ * `method === 'triageReport'` 时 `channel.report` 的 input：agent-runtime 的 parseTriageReport 已校验，
+ * Main 原样透传（插件仍应按 unknown 收窄）
+ */
+export interface ChannelTriageReport {
+  kind: 'bug' | 'feature' | 'question' | 'invalid';
+  title: string;
+  summary: string;
+  reply: string;
+  evidence?: string;
+  assessment?: string;
+  needInfo?: boolean;
+  /**
+   * 反馈属于本群绑定的另一个项目时是该项目名（已 trim，1–100 字符）：插件不把 reply 发到群里，
+   * 而是把这条反馈转给那个项目的分诊会话（最多转一次）
+   */
+  project?: string;
+}
+
+/** 宿主调插件 `channel.report` 的入参：本插件 triage 会话里的 triage_report 等调用（input 未收窄，triageReport 见 ChannelTriageReport） */
 export interface ChannelReportCall {
   sessionId: string;
   method: string;
@@ -121,12 +152,23 @@ export interface FynvraPluginApi {
   };
   /** 渠道 API（全部需要 channel 权限，只能作用于本插件拥有的会话 / 工作区 / 任务） */
   channel: {
-    /** 在工作区的干净检出里建档位会话（须是有默认分支与远端的 git 工作区），归属本插件 */
+    /** 启用且有 key 的服务下的全部模型，顺序同设置页 */
+    models(): Promise<{ models: ChannelModel[] }>;
+    /**
+     * 在工作区的干净检出里建档位会话（须是有默认分支与远端的 git 工作区），归属本插件。
+     * model 缺省时 triage 用默认模型、restricted 用 Orchestrator 角色的模型；指定的模型不存在、服务停用或没有 key 时报错（不退回默认）
+     */
     createSession(input: {
       workspaceId: string;
       profile: ChannelProfile;
       title: string;
+      model?: ChannelModelRef;
     }): Promise<{ sessionId: string }>;
+    /**
+     * 换本插件会话的模型，从下一次 prompt 起生效；null 回到档位默认（同 createSession 不带 model）。
+     * 会话运行中时拒绝（稍后重试）；restricted 会话派出的 worker 默认跟它当时的模型
+     */
+    setSessionModel(input: { sessionId: string; model: ChannelModelRef | null }): Promise<void>;
     /** 把干净检出切到 origin 默认分支最新提交（本插件该工作区有会话在跑时拒绝） */
     refreshCheckout(input: { workspaceId: string }): Promise<void>;
     originCommit(input: { workspaceId: string }): Promise<{ commit: string }>;

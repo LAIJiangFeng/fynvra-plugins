@@ -1,7 +1,7 @@
 // 插件数据（移植自 Fynvra 内置 telegram/store.ts）：存进 api.storage（≤ 5 MB，原子写）。
 // token 不进 storage，放在 api.secrets 的 botToken；旧 telegram.json 迁移时也用这里的收窄逻辑。
 // 字段非法时只丢弃那个字段或那条记录。
-import type { FynvraPluginApi } from './types/appPluginApi.js';
+import type { ChannelModelRef, FynvraPluginApi } from './types/appPluginApi.js';
 import {
   isTelegramRateLimit,
   TELEGRAM_RATE_LIMIT_DEFAULT,
@@ -90,6 +90,9 @@ export interface TelegramData {
   rateLimitPerHour: number;
   /** 旧 telegram.json 已经处理过（迁移成功或没有旧数据） */
   legacyMigrated: boolean;
+  /** 分诊 / 值班会话用的模型；缺省为默认 */
+  triageModel?: ChannelModelRef;
+  dutyModel?: ChannelModelRef;
 }
 
 export function emptyTelegramData(): TelegramData {
@@ -220,6 +223,17 @@ function parseCard(raw: unknown): StoredCard | null {
   return card;
 }
 
+const isModelId = (value: unknown): value is string =>
+  typeof value === 'string' && value.length >= 1 && value.length <= 200;
+
+/** 模型引用：服务 id 与模型 id 各 1–200 字符；不合法时当作没选 */
+export function parseModelRef(raw: unknown): ChannelModelRef | undefined {
+  const r = asRecord(raw);
+  return r && isModelId(r.providerId) && isModelId(r.modelId)
+    ? { providerId: r.providerId, modelId: r.modelId }
+    : undefined;
+}
+
 function list<T>(raw: unknown, parse: (item: unknown) => T | null): T[] {
   return Array.isArray(raw) ? raw.flatMap((item) => parse(item) ?? []) : [];
 }
@@ -259,6 +273,10 @@ export function parseTelegramData(raw: unknown): TelegramData {
   if (isNonNegative(r.pollOffset)) data.pollOffset = r.pollOffset;
   if (isTelegramRateLimit(r.rateLimitPerHour)) data.rateLimitPerHour = r.rateLimitPerHour;
   data.legacyMigrated = r.legacyMigrated === true;
+  const triageModel = parseModelRef(r.triageModel);
+  if (triageModel) data.triageModel = triageModel;
+  const dutyModel = parseModelRef(r.dutyModel);
+  if (dutyModel) data.dutyModel = dutyModel;
   return data;
 }
 

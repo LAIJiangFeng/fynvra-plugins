@@ -1,5 +1,6 @@
 // Telegram 群反馈值班的视图类型（移植自 Fynvra src/shared/types/telegram.ts）；不含 token 明文。
 // 插件的启用和停用由 Fynvra 的插件卡片负责，所以没有内置版的 enabled 与 disabled 状态。
+import type { ChannelModelRef } from './types/appPluginApi.js';
 
 /** 连接状态：没有 token / 连接中 / 已连接 / 网络错误 / token 无效 / 同一 token 另有实例在轮询 / 其他 API 错误 */
 export type TelegramConnection =
@@ -82,6 +83,11 @@ export interface TelegramStateView {
   cards: TelegramCardView[];
   /** 每人每小时最多处理几条 */
   rateLimitPerHour: number;
+  /** 分诊 / 值班会话用的模型；缺省为默认 */
+  triageModel?: ChannelModelRef;
+  dutyModel?: ChannelModelRef;
+  /** 带所选模型建会话或换模型失败过（已改用默认）；用户改选后清除 */
+  modelFallback: boolean;
 }
 
 /** 每人每小时限额：默认 5，可配 1–1000 */
