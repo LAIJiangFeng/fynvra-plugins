@@ -15,6 +15,12 @@
       "commit": "cbbe8efd0b3d4db5f9d251f02a8804aa837eee5a",
       "path": "official/com.fynvra.telegram",
       "changelog": "首个公开版本：群里 @机器人 反馈问题，自动分诊与追问；支持图片和文档（先发图再 @、先 @ 再发图也能识别）；定位到原因的 bug 由值班会话修复并开 PR，新功能需在设置页采纳；群回复先经过出站过滤。"
+    },
+    {
+      "version": "0.1.4",
+      "commit": "8c874348b26cf56adf003290856543ad911cbc3f",
+      "path": "official/com.fynvra.telegram",
+      "changelog": "一个群可以绑定多个项目，分诊自动判断并转交到对应项目处理（需要支持该功能的 Fynvra）"
     }
   ]
 }
