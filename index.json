@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "sequence": 1795340423,
-  "generatedAt": "2026-11-22T09:40:23.275Z",
+  "sequence": 1795342028,
+  "generatedAt": "2026-11-22T10:07:08.045Z",
   "plugins": [
     {
       "id": "com.fynvra.telegram",
@@ -20,6 +20,32 @@
       "tier": "official",
       "kind": "fynvra",
       "versions": [
+        {
+          "version": "0.1.6",
+          "engines": {
+            "fynvra": ">=0.1.0"
+          },
+          "commit": "b4475e7c658ad086cea0faa219a0b21765f17548",
+          "permissions": [
+            "notifications",
+            "network",
+            "workspaces",
+            "channel",
+            "ui"
+          ],
+          "changelog": "设置页重新排版；分诊和值班可以选择思考档位（需要支持该功能的 Fynvra）",
+          "publishedAt": "2026-11-22T10:07:08.045Z",
+          "package": {
+            "path": "packages/com.fynvra.telegram/0.1.6.zip",
+            "sha256": "461a627cc24e86aef21b89d045d1bafb63edb39f482da246f4b5e958515e2a9d",
+            "size": 118395
+          },
+          "readme": {
+            "path": "readme/com.fynvra.telegram/0.1.6.md",
+            "sha256": "da1cca057aac7fab677f8d39513e8d13bf8f317fac9cb60b304c16717ecd9c0f",
+            "size": 12919
+          }
+        },
         {
           "version": "0.1.5",
           "engines": {
