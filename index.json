@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "sequence": 1795339193,
-  "generatedAt": "2026-11-22T09:19:53.556Z",
+  "sequence": 1795340423,
+  "generatedAt": "2026-11-22T09:40:23.275Z",
   "plugins": [
     {
       "id": "com.fynvra.telegram",
@@ -20,6 +20,32 @@
       "tier": "official",
       "kind": "fynvra",
       "versions": [
+        {
+          "version": "0.1.5",
+          "engines": {
+            "fynvra": ">=0.1.0"
+          },
+          "commit": "2b7ecafb8fb8baea40559b0f26f08046c71f8163",
+          "permissions": [
+            "notifications",
+            "network",
+            "workspaces",
+            "channel",
+            "ui"
+          ],
+          "changelog": "设置页可以分别选择分诊模型和值班模型（需要支持该功能的 Fynvra）",
+          "publishedAt": "2026-11-22T09:40:23.275Z",
+          "package": {
+            "path": "packages/com.fynvra.telegram/0.1.5.zip",
+            "sha256": "e7a620b1953f77ad898ec82b44b2cb23e8edbd0821a3459f571801cd26d1bd89",
+            "size": 117038
+          },
+          "readme": {
+            "path": "readme/com.fynvra.telegram/0.1.5.md",
+            "sha256": "56f518a82a3118722d0073fb38a0ff78ef5492817bd0ff5ec487797c82ef7303",
+            "size": 11910
+          }
+        },
         {
           "version": "0.1.4",
           "engines": {
