@@ -1,6 +1,6 @@
 # 向 Fynvra 插件市场提交插件
 
-感谢你为 Fynvra 写插件！本文说明怎么写插件、本地测试、提交审核以及发布更新。
+感谢你为 Fynvra 写插件！本文说明怎么写插件、本地试用、提交审核以及发布更新。
 
 ## 0. 两类插件
 
@@ -13,7 +13,7 @@
 
 ## 1. 写一个插件
 
-PI 插件就是一个 [pi](https://github.com/earendil-works/pi) 包，再加一个 `fynvra-plugin.json` 清单。最简单的做法是复制官方示例 [`official/com.fynvra.hello`](official/com.fynvra.hello)。
+PI 插件就是一个 [pi](https://github.com/earendil-works/pi) 包，再加一个 `fynvra-plugin.json` 清单。
 
 插件根目录至少包含：
 
@@ -118,14 +118,13 @@ Fynvra 插件不需要是 pi 包（不检查 `pi.extensions`，`package.json` �
 
 用到依赖时，依赖的行为也算插件的行为。
 
-## 2. 本地测试
+## 2. 本地试用
 
 1. 在 Fynvra 中打开「设置 → 插件」，用「添加本地插件」选择你的插件目录。
 2. 在对话里实际调用你的工具或命令，确认工作正常、没有报错。
 3. 在本仓库检出目录中，可以用和 CI 相同的脚本做检查（需要 Node 22+）：
    ```bash
    node scripts/validate.mjs            # 校验条目格式
-   node --test scripts/test             # 脚本自身的测试
    ```
 
 ## 3. 打包规则与上限

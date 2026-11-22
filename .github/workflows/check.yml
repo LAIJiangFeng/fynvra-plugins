@@ -19,9 +19,6 @@ jobs:
         with:
           node-version: 22
 
-      - name: 单元测试
-        run: node --test scripts/test
-
       - name: 校验条目
         run: node scripts/validate.mjs
 

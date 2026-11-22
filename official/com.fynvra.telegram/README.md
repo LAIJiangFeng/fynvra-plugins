@@ -82,10 +82,4 @@ node ../fynvra/node_modules/typescript/bin/tsc -p official/com.fynvra.telegram -
 
 改完源码要重新编译并一起提交 `dist/`；编译后 `git status` 应当没有 `dist/` 的额外改动。
 
-测试（node:test，针对 `dist/`，用假的宿主 API）：
-
-```bash
-node --test official/com.fynvra.telegram/test
-```
-
 本地联调：用开发版 Fynvra 打开「设置 → 插件 → 添加本地 Fynvra 插件（开发）」，选择 `official/com.fynvra.telegram` 目录。

@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        提交前请先阅读 [CONTRIBUTING.md](https://github.com/LAIJiangFeng/fynvra-plugins/blob/main/CONTRIBUTING.md)，确认插件根目录有 `fynvra-plugin.json`，并已在 Fynvra 中用「添加本地插件」测试过。
+        提交前请先阅读 [CONTRIBUTING.md](https://github.com/LAIJiangFeng/fynvra-plugins/blob/main/CONTRIBUTING.md)，确认插件根目录有 `fynvra-plugin.json`，并已在 Fynvra 中用「添加本地插件」试用过。
   - type: input
     id: repository
     attributes:
