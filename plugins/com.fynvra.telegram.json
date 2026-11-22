@@ -27,6 +27,12 @@
       "commit": "2b7ecafb8fb8baea40559b0f26f08046c71f8163",
       "path": "official/com.fynvra.telegram",
       "changelog": "设置页可以分别选择分诊模型和值班模型（需要支持该功能的 Fynvra）"
+    },
+    {
+      "version": "0.1.6",
+      "commit": "b4475e7c658ad086cea0faa219a0b21765f17548",
+      "path": "official/com.fynvra.telegram",
+      "changelog": "设置页重新排版；分诊和值班可以选择思考档位（需要支持该功能的 Fynvra）"
     }
   ]
 }
