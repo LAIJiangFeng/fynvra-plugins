@@ -23,13 +23,23 @@ export interface StoredCandidate {
   seenAt: number;
 }
 
+/** 群绑定的项目：note 是维护者写的一句说明（≤ 200 字，可为空） */
+export interface StoredProject {
+  workspaceId: string;
+  note: string;
+}
+
 export interface StoredGroup {
   chatId: number;
   title: string;
-  workspaceId: string;
-  triageSessionId: string;
+  /** 按顺序排，第一个是主项目；至少一个 */
+  projects: StoredProject[];
+  /** 每个「群 × 项目」的分诊会话：workspaceId → sessionId（用到时再创建） */
+  triageSessions: Record<string, string>;
   active: boolean;
 }
+
+export const PROJECT_NOTE_MAX = 200;
 
 /** 插件拿不到路径，内置版的 cleanCheckoutPath 不再保存 */
 export interface StoredWorkspace {
@@ -122,14 +132,39 @@ function parseCandidate(raw: unknown): StoredCandidate | null {
   return { chatId: r.chatId, title: text(r.title, 256) ?? '', seenAt: r.seenAt };
 }
 
+/**
+ * 群：新结构是 projects + triageSessions；旧结构（0.1.3 及以前）的 workspaceId + triageSessionId
+ * 迁成单个项目。坏的项目或会话条目单独丢掉，一个项目都没有时才丢掉这个群。
+ */
 function parseGroup(raw: unknown): StoredGroup | null {
   const r = asRecord(raw);
-  if (!r || !isInt(r.chatId) || !isId(r.workspaceId) || !isId(r.triageSessionId)) return null;
+  if (!r || !isInt(r.chatId)) return null;
+  const projects: StoredProject[] = [];
+  const triageSessions: Record<string, string> = {};
+  const addProject = (workspaceId: unknown, note: unknown) => {
+    if (!isId(workspaceId) || projects.some((p) => p.workspaceId === workspaceId)) return;
+    projects.push({ workspaceId, note: text(note, PROJECT_NOTE_MAX)?.trim() ?? '' });
+  };
+  if (Array.isArray(r.projects)) {
+    for (const item of r.projects) {
+      const p = asRecord(item);
+      if (p) addProject(p.workspaceId, p.note);
+    }
+    for (const [id, session] of Object.entries(asRecord(r.triageSessions) ?? {})) {
+      if (isId(session) && projects.some((p) => p.workspaceId === id)) triageSessions[id] = session;
+    }
+  } else {
+    addProject(r.workspaceId, '');
+    if (isId(r.workspaceId) && isId(r.triageSessionId)) {
+      triageSessions[r.workspaceId] = r.triageSessionId;
+    }
+  }
+  if (projects.length === 0) return null;
   return {
     chatId: r.chatId,
     title: text(r.title, 256) ?? '',
-    workspaceId: r.workspaceId,
-    triageSessionId: r.triageSessionId,
+    projects,
+    triageSessions,
     active: r.active !== false,
   };
 }

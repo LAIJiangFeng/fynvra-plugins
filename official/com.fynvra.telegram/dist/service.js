@@ -5,7 +5,7 @@
 import { isTelegramRateLimit, maskTelegramToken, } from './model.js';
 import { addMessageAttachments, cleanupStaleAttachments, downloadAttachments, mergeAttachments, rejectionSummary, removeFiles, } from './attachments.js';
 import { dutyPrompt, MAX_FOLLOW_UPS, parseAssessment, parseBotMention, parseBugCommand, parseTriageInput, pullRequestSection, TEMPLATES, triagePrompt, } from './content.js';
-import { createTelegramStore, emptyTelegramData, MAX_CANDIDATES, MAX_CARDS, parseTelegramData, TOKEN_SECRET_KEY, } from './store.js';
+import { createTelegramStore, emptyTelegramData, MAX_CANDIDATES, MAX_CARDS, parseTelegramData, PROJECT_NOTE_MAX, TOKEN_SECRET_KEY, } from './store.js';
 import { redactToken, TELEGRAM_TOKEN_PATTERN, TelegramApiError, } from './telegramApi.js';
 import { asRecord, errorMessage } from './util.js';
 export const DEBOUNCE_MS = 3_000;
@@ -202,7 +202,35 @@ export function createTelegramService(deps) {
     const groupOf = (chatId) => data.groups.find((group) => group.chatId === chatId);
     /** 回复了某张卡片：还在分诊阶段的算追问回复，其余按新反馈并把它作背景 */
     const routeOf = (card) => RETRIAGE_STATUSES.has(card.status) ? { cardId: card.id } : { contextCardId: card.id };
-    const groupOfSession = (sessionId) => data.groups.find((group) => group.triageSessionId === sessionId);
+    /** 分诊会话属于哪个群的哪个项目（项目已从群里移除的不算） */
+    const groupOfSession = (sessionId) => {
+        for (const group of data.groups) {
+            for (const { workspaceId } of group.projects) {
+                if (group.triageSessions[workspaceId] === sessionId)
+                    return { group, workspaceId };
+            }
+        }
+        return undefined;
+    };
+    const primaryOf = (group) => group.projects[0]?.workspaceId ?? '';
+    /** 条目该投给哪个项目：转交目标 > 所回复卡片的项目 > 主项目；不再绑定的项目回落到主项目 */
+    const targetOf = (group, item) => {
+        const cardId = item.cardId ?? item.contextCardId;
+        const wanted = item.forward?.workspaceId ?? (cardId === undefined ? undefined : cardById(cardId)?.workspaceId);
+        return wanted && group.projects.some((p) => p.workspaceId === wanted)
+            ? wanted
+            : primaryOf(group);
+    };
+    /** 群里各项目给 AI 看的名称：工作区名；同名（trim 后不区分大小写）时后面加 id */
+    const projectLabels = (group, workspaces) => {
+        const names = group.projects.map(({ workspaceId }) => workspaces.find((w) => w.id === workspaceId)?.name.trim() || workspaceId);
+        const key = (name) => name.trim().toLowerCase();
+        return new Map(group.projects.map(({ workspaceId }, index) => {
+            const name = names[index] ?? workspaceId;
+            const dup = names.filter((other) => key(other) === key(name)).length > 1;
+            return [workspaceId, dup ? `${name}（${workspaceId}）` : name];
+        }));
+    };
     const workspaceOfDuty = (sessionId) => Object.entries(data.workspaces).find(([, entry]) => entry.dutySessionId === sessionId)?.[0];
     const findWorkspace = async (id) => (await api.workspaces.list()).find((workspace) => workspace.id === id);
     // ---------- 会话状态 ----------
@@ -241,7 +269,7 @@ export function createTelegramService(deps) {
     /** 本工作区的档位会话（分诊与值班）是否有正在跑的（按最近已知状态） */
     const profileSessionRunning = (workspaceId) => {
         const ids = [
-            ...data.groups.filter((g) => g.workspaceId === workspaceId).map((g) => g.triageSessionId),
+            ...data.groups.map((g) => g.triageSessions[workspaceId]),
             data.workspaces[workspaceId]?.dutySessionId,
         ];
         return ids.some((id) => id !== undefined && isBusy(statuses.get(id)));
@@ -315,18 +343,22 @@ export function createTelegramService(deps) {
         statuses.set(sessionId, 'idle');
         return sessionId;
     };
-    const ensureTriageSession = async (group) => {
-        if (await sessionAlive(group.triageSessionId))
-            return true;
+    /** 「群 × 项目」的分诊会话：没有或已失效时创建 */
+    const ensureTriageSession = async (group, workspaceId) => {
+        const existing = group.triageSessions[workspaceId];
+        if (await sessionAlive(existing))
+            return existing;
+        let sessionId;
         try {
-            group.triageSessionId = await createSession(group.workspaceId, 'triage', `Telegram 分诊 · ${group.title}`);
+            sessionId = await createSession(workspaceId, 'triage', `Telegram 分诊 · ${group.title}`);
         }
         catch (error) {
-            warn(`重建分诊会话失败：${errorMessage(error)}`);
-            return false;
+            warn(`创建分诊会话失败（${workspaceId}）：${errorMessage(error)}`);
+            return undefined;
         }
+        group.triageSessions[workspaceId] = sessionId;
         commit();
-        return true;
+        return sessionId;
     };
     const ensureDutySession = async (workspaceId) => {
         const entry = data.workspaces[workspaceId];
@@ -382,40 +414,48 @@ export function createTelegramService(deps) {
             dropQueue(chatId);
             return;
         }
-        if (inflight.has(group.triageSessionId))
-            return;
         const next = pickReady(queue);
         if (!next.item) {
             scheduleChat(chatId, next.wake - now());
             return;
         }
-        pumping.add(chatId);
-        try {
-            if (!(await findWorkspace(group.workspaceId))) {
-                warn(`群绑定的工作区不存在：${group.workspaceId}`);
+        const item = next.item;
+        if (item.supplementOf) {
+            const source = item.supplementOf;
+            // 来源条目还在分诊或等转交：等它的卡片定下来（那一轮结束后会再触发投递）
+            if (source.cardId === undefined &&
+                ([...inflight.values()].some((i) => i.outcome === source) ||
+                    queue.some((q) => q !== item && q.outcome === source))) {
                 return;
             }
-            if (!(await ensureTriageSession(group)))
+            // 卡片已定：按回复该卡片路由（投到卡片所属项目）
+            const card = source.cardId === undefined ? undefined : cardById(source.cardId);
+            if (card)
+                Object.assign(item, routeOf(card));
+            delete item.supplementOf;
+        }
+        const workspaceId = targetOf(group, item);
+        if (inflight.has(group.triageSessions[workspaceId] ?? ''))
+            return;
+        pumping.add(chatId);
+        try {
+            const workspaces = await api.workspaces.list();
+            if (!workspaces.some((w) => w.id === workspaceId)) {
+                warn(`群绑定的工作区不存在：${workspaceId}`);
                 return;
-            const sessionId = group.triageSessionId;
+            }
+            const sessionId = await ensureTriageSession(group, workspaceId);
+            if (!sessionId)
+                return;
             if ((await statusOf(sessionId)) !== 'idle')
                 return; // 忙：结束或 idle 事件后再投
-            await refreshCheckout(group.workspaceId);
-            const item = pickReady(queue).item;
-            if (!item || inflight.has(sessionId))
+            await refreshCheckout(workspaceId);
+            if (!queue.includes(item) || inflight.has(sessionId))
                 return;
             if (item.awaiting) {
                 // 60 秒没等到后一条：用占位正文投递，让 AI 追问
                 item.awaiting = false;
                 item.texts = [EMPTY_MENTION_TEXT];
-            }
-            if (item.supplementOf) {
-                // 来源条目这一轮已结束（同一个分诊会话串行），卡片已定：按回复该卡片路由
-                const source = item.supplementOf.cardId;
-                const card = source === undefined ? undefined : cardById(source);
-                if (card)
-                    Object.assign(item, routeOf(card));
-                delete item.supplementOf;
             }
             if (!item.started) {
                 item.started = true;
@@ -447,8 +487,17 @@ export function createTelegramService(deps) {
             const downloaded = item.downloaded;
             const card = item.cardId === undefined ? undefined : cardById(item.cardId);
             const context = item.contextCardId === undefined ? undefined : cardById(item.contextCardId);
+            const labels = projectLabels(group, workspaces);
+            // 新反馈且没转过的才列其他项目；追问回复留在卡片所属项目
+            const otherProjects = item.forward || item.cardId !== undefined
+                ? []
+                : group.projects
+                    .filter((p) => p.workspaceId !== workspaceId)
+                    .map((p) => ({ name: labels.get(p.workspaceId) ?? p.workspaceId, note: p.note }));
             const prompt = triagePrompt({
                 groupTitle: group.title,
+                ...(otherProjects.length > 0 ? { otherProjects } : {}),
+                ...(item.forward ? { forwardedFrom: item.forward.from } : {}),
                 ...(card
                     ? {
                         card: {
@@ -475,7 +524,7 @@ export function createTelegramService(deps) {
                 rejected: rejectionSummary([...item.files.rejected, ...downloaded.rejected]),
             });
             // 先登记在途条目：triage_report 可能在 prompt 返回前就到
-            const pending = { ...item, reported: false };
+            const pending = { ...item, workspaceId, reported: false };
             inflight.set(sessionId, pending);
             let delivered = false;
             try {
@@ -499,8 +548,7 @@ export function createTelegramService(deps) {
                 // 已投出即在跑；之后变成非忙状态就是这一轮结束（状态事件被合并时也不会漏）
                 if (!isBusy(statuses.get(sessionId)))
                     statuses.set(sessionId, 'running');
-                // 核心已在 prompt 内读完附件
-                discardFiles([item]);
+                // 附件先不删：转交时还要再投一次，等这条反馈得到最终报告后由 onSettled 删
                 const at = queue.indexOf(item);
                 if (at >= 0)
                     queue.splice(at, 1);
@@ -543,7 +591,7 @@ export function createTelegramService(deps) {
         const card = {
             id: nextCardId(),
             chatId: item.chatId,
-            workspaceId: group.workspaceId,
+            workspaceId: item.workspaceId,
             status: 'unreported',
             title: text.replace(/\s+/g, ' ').slice(0, 80),
             summary: '',
@@ -930,10 +978,24 @@ export function createTelegramService(deps) {
             return text;
         }
     };
+    /**
+     * 转交：同样的正文和已下载的附件原样排到队首，投给目标项目的分诊会话（pumpChat 会先建会话、刷新干净检出）。
+     * 不建卡片、不计限流；outcome 与原条目共用，补充附件会跟到最终的卡片。
+     */
+    const forwardItem = (item, workspaceId, from) => {
+        item.forwarded = true;
+        const { workspaceId: _from, reported: _reported, forwarded: _forwarded, lateRejected: _late, ...rest } = item;
+        const copy = { ...rest, forward: { workspaceId, from }, readyAt: now() };
+        const queue = queues.get(item.chatId) ?? [];
+        queue.unshift(copy);
+        queues.set(item.chatId, queue);
+        scheduleChat(item.chatId, 0);
+    };
     const handleTriageReport = async (sessionId, input) => {
-        const group = groupOfSession(sessionId);
-        if (!group)
+        const owner = groupOfSession(sessionId);
+        if (!owner)
             return { ok: false, error: 'not a registered triage session' };
+        const { group, workspaceId } = owner;
         const item = inflight.get(sessionId);
         if (!item)
             return { ok: false, error: 'no pending item for this session' };
@@ -943,6 +1005,17 @@ export function createTelegramService(deps) {
         if (typeof report === 'string')
             return { ok: false, error: report };
         item.reported = true;
+        if (report.project !== undefined && !item.forward && item.cardId === undefined) {
+            // 分诊判断属于本群另一个项目：这次不回复，把同一条反馈原样转过去（匹配不上就照常处理）
+            const labels = projectLabels(group, await api.workspaces.list());
+            const key = report.project.trim().toLowerCase();
+            const target = group.projects.find((p) => p.workspaceId !== workspaceId &&
+                (labels.get(p.workspaceId) ?? '').trim().toLowerCase() === key);
+            if (target) {
+                forwardItem(item, target.workspaceId, labels.get(workspaceId) ?? workspaceId);
+                return { ok: true };
+            }
+        }
         const time = now();
         const [title, summary, evidence, assessment] = await Promise.all([
             clean(report.title),
@@ -955,7 +1028,7 @@ export function createTelegramService(deps) {
             card = {
                 id: nextCardId(),
                 chatId: group.chatId,
-                workspaceId: group.workspaceId,
+                workspaceId,
                 status: 'unreported',
                 title: '',
                 summary: '',
@@ -970,6 +1043,7 @@ export function createTelegramService(deps) {
             addCard(card);
         }
         item.outcome.cardId = card.id;
+        card.workspaceId = workspaceId;
         card.kind = report.kind;
         card.title = title;
         card.summary = summary;
@@ -1212,24 +1286,27 @@ export function createTelegramService(deps) {
     };
     // ---------- 会话事件 ----------
     function onSessionIdle(sessionId) {
-        const group = groupOfSession(sessionId);
-        if (group)
-            void pumpChat(group.chatId);
+        const owner = groupOfSession(sessionId);
+        if (owner)
+            void pumpChat(owner.group.chatId);
         const workspaceId = workspaceOfDuty(sessionId);
         if (workspaceId)
             void pumpDuty(workspaceId);
     }
     function onSettled(sessionId) {
-        const group = groupOfSession(sessionId);
-        if (group) {
-            const item = inflight.get(sessionId);
-            if (item) {
-                inflight.delete(sessionId);
-                if (!item.reported)
-                    recordUnreported(item);
-            }
-            void pumpChat(group.chatId);
+        const owner = groupOfSession(sessionId);
+        const item = inflight.get(sessionId);
+        if (item) {
+            inflight.delete(sessionId);
+            if (owner && !item.reported)
+                recordUnreported(item);
+            // 这条反馈在这里结束（没有转交）：删掉它的附件
+            if (!item.forwarded)
+                discardFiles([item]);
         }
+        const chatId = owner?.group.chatId ?? item?.chatId;
+        if (chatId !== undefined)
+            void pumpChat(chatId);
         const workspaceId = workspaceOfDuty(sessionId);
         if (workspaceId)
             void finishDutyRound(workspaceId, sessionId);
@@ -1267,7 +1344,12 @@ export function createTelegramService(deps) {
         ...(data.token ? { tokenMasked: maskTelegramToken(data.token) } : {}),
         ...(data.bot ? { bot: { ...data.bot } } : {}),
         candidates: data.candidates.map((c) => ({ ...c })),
-        groups: data.groups.map((g) => ({ ...g })),
+        groups: data.groups.map((g) => ({
+            chatId: g.chatId,
+            title: g.title,
+            projects: g.projects.map((p) => ({ ...p })),
+            active: g.active,
+        })),
         cards: [...data.cards].reverse().map((card) => ({
             id: card.id,
             chatId: card.chatId,
@@ -1288,6 +1370,19 @@ export function createTelegramService(deps) {
         })),
         rateLimitPerHour: data.rateLimitPerHour,
     });
+    /** 设置页改动：落盘成功后通知重画 */
+    const commitOrError = async () => {
+        const saved = await saveOrError();
+        emit();
+        return saved;
+    };
+    /** 放弃一个分诊会话的在途条目（群或项目被移除）；已转交的附件归队列里的副本 */
+    const dropInflight = (sessionId) => {
+        const item = inflight.get(sessionId);
+        inflight.delete(sessionId);
+        if (item && !item.forwarded)
+            discardFiles([item]);
+    };
     const saveOrError = async () => {
         try {
             await persist();
@@ -1468,8 +1563,8 @@ export function createTelegramService(deps) {
             data.groups.push({
                 chatId,
                 title: candidate.title,
-                workspaceId,
-                triageSessionId: sessionId,
+                projects: [{ workspaceId, note: '' }],
+                triageSessions: { [workspaceId]: sessionId },
                 active: true,
             });
             data.candidates = data.candidates.filter((c) => c.chatId !== chatId);
@@ -1482,7 +1577,8 @@ export function createTelegramService(deps) {
                 return { ok: false, error: '群不存在' };
             data.groups = data.groups.filter((g) => g.chatId !== chatId);
             dropQueue(chatId);
-            inflight.delete(group.triageSessionId);
+            for (const sessionId of Object.values(group.triageSessions))
+                dropInflight(sessionId);
             if (group.active) {
                 data.candidates.push({ chatId, title: group.title, seenAt: now() });
                 if (data.candidates.length > MAX_CANDIDATES)
@@ -1490,6 +1586,58 @@ export function createTelegramService(deps) {
             }
             commit();
             return { ok: true };
+        },
+        async addProject(chatId, workspaceId) {
+            const group = groupOf(chatId);
+            if (!group)
+                return { ok: false, error: '群不存在' };
+            if (group.projects.some((p) => p.workspaceId === workspaceId)) {
+                return { ok: false, error: '这个项目已经绑定' };
+            }
+            const workspace = await findWorkspace(workspaceId);
+            if (!workspace)
+                return { ok: false, error: '工作区不存在' };
+            if (!workspace.git)
+                return { ok: false, error: '只能绑定有默认分支的 git 工作区' };
+            // 分诊会话用到时再创建
+            group.projects.push({ workspaceId, note: '' });
+            data.workspaces[workspaceId] = { ...data.workspaces[workspaceId] };
+            return commitOrError();
+        },
+        async removeProject(chatId, workspaceId) {
+            const group = groupOf(chatId);
+            if (!group)
+                return { ok: false, error: '群不存在' };
+            if (!group.projects.some((p) => p.workspaceId === workspaceId)) {
+                return { ok: false, error: '这个项目没有绑定' };
+            }
+            if (group.projects.length <= 1)
+                return { ok: false, error: '至少要保留一个项目' };
+            group.projects = group.projects.filter((p) => p.workspaceId !== workspaceId);
+            const sessionId = group.triageSessions[workspaceId];
+            delete group.triageSessions[workspaceId];
+            if (sessionId)
+                dropInflight(sessionId);
+            return commitOrError();
+        },
+        async setPrimaryProject(chatId, workspaceId) {
+            const group = groupOf(chatId);
+            const project = group?.projects.find((p) => p.workspaceId === workspaceId);
+            if (!group || !project)
+                return { ok: false, error: '这个项目没有绑定' };
+            group.projects = [project, ...group.projects.filter((p) => p !== project)];
+            return commitOrError();
+        },
+        async setProjectNote(chatId, workspaceId, note) {
+            const project = groupOf(chatId)?.projects.find((p) => p.workspaceId === workspaceId);
+            if (!project)
+                return { ok: false, error: '这个项目没有绑定' };
+            const trimmed = note.trim();
+            if (trimmed.length > PROJECT_NOTE_MAX) {
+                return { ok: false, error: `说明最多 ${PROJECT_NOTE_MAX} 字` };
+            }
+            project.note = trimmed;
+            return commitOrError();
         },
         async resolveCard(cardId, action) {
             const card = cardById(cardId);

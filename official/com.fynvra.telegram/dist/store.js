@@ -6,6 +6,7 @@ export const MAX_CARDS = 500;
 const TEXT_MAX = 4_000;
 /** api.secrets 里存 token 的键 */
 export const TOKEN_SECRET_KEY = 'botToken';
+export const PROJECT_NOTE_MAX = 200;
 export function emptyTelegramData() {
     return {
         candidates: [],
@@ -41,15 +42,45 @@ function parseCandidate(raw) {
         return null;
     return { chatId: r.chatId, title: text(r.title, 256) ?? '', seenAt: r.seenAt };
 }
+/**
+ * 群：新结构是 projects + triageSessions；旧结构（0.1.3 及以前）的 workspaceId + triageSessionId
+ * 迁成单个项目。坏的项目或会话条目单独丢掉，一个项目都没有时才丢掉这个群。
+ */
 function parseGroup(raw) {
     const r = asRecord(raw);
-    if (!r || !isInt(r.chatId) || !isId(r.workspaceId) || !isId(r.triageSessionId))
+    if (!r || !isInt(r.chatId))
+        return null;
+    const projects = [];
+    const triageSessions = {};
+    const addProject = (workspaceId, note) => {
+        if (!isId(workspaceId) || projects.some((p) => p.workspaceId === workspaceId))
+            return;
+        projects.push({ workspaceId, note: text(note, PROJECT_NOTE_MAX)?.trim() ?? '' });
+    };
+    if (Array.isArray(r.projects)) {
+        for (const item of r.projects) {
+            const p = asRecord(item);
+            if (p)
+                addProject(p.workspaceId, p.note);
+        }
+        for (const [id, session] of Object.entries(asRecord(r.triageSessions) ?? {})) {
+            if (isId(session) && projects.some((p) => p.workspaceId === id))
+                triageSessions[id] = session;
+        }
+    }
+    else {
+        addProject(r.workspaceId, '');
+        if (isId(r.workspaceId) && isId(r.triageSessionId)) {
+            triageSessions[r.workspaceId] = r.triageSessionId;
+        }
+    }
+    if (projects.length === 0)
         return null;
     return {
         chatId: r.chatId,
         title: text(r.title, 256) ?? '',
-        workspaceId: r.workspaceId,
-        triageSessionId: r.triageSessionId,
+        projects,
+        triageSessions,
         active: r.active !== false,
     };
 }

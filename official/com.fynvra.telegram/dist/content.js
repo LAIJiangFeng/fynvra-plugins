@@ -18,6 +18,7 @@ export const TEMPLATES = {
 export function escapeUntrusted(text) {
     return text.replace(/<(\s*\/?\s*untrusted-content)/gi, '&lt;$1');
 }
+const oneLine = (text) => text.replace(/\s+/g, ' ').trim();
 /**
  * 投给 triage 会话的正文：说明在 `<untrusted-content>` 之外，外部文本全在里面并转义。
  * 附件说明是插件生成的可信元数据，放在标签之外的末尾；未处理附件的文件名来自用户，另包一层 untrusted。
@@ -50,6 +51,17 @@ export function triagePrompt(item) {
         `已追问 ${rounds}/${MAX_FOLLOW_UPS} 轮`,
         '本条目调用 triage_report 恰好一次（call triage_report exactly once for this item）。',
         'title、summary、evidence 不要写群成员的名字或昵称，用「群成员」或「用户」代替；也不要复述截图或附件里的链接、凭证、个人信息。',
+        ...(item.forwardedFrom
+            ? [
+                `这条反馈由「${oneLine(item.forwardedFrom)}」的分诊判断属于本项目，请直接在本项目处理，不要再填 project。`,
+            ]
+            : []),
+        ...(item.otherProjects?.length
+            ? [
+                '本群还绑定了下列其他项目。如果这条反馈明显属于其中某个项目，在 triage_report 里把 project 填成该项目名（照抄下面的名称），这条反馈会转给那个项目处理，这次的 reply 不会发到群里；属于本项目或拿不准时不要填 project：',
+                ...item.otherProjects.map((p) => `- ${oneLine(p.name)}${oneLine(p.note) ? `：${oneLine(p.note)}` : ''}`),
+            ]
+            : []),
         '',
         '<untrusted-content source="telegram">',
         body,
@@ -143,6 +155,10 @@ export function parseTriageInput(raw) {
     const assessment = str('assessment')?.trim();
     if (assessment)
         report.assessment = assessment;
+    // 非字符串或空串按没填处理，不报错
+    const project = typeof r.project === 'string' ? r.project.slice(0, 200).trim() : '';
+    if (project)
+        report.project = project;
     return report;
 }
 /**

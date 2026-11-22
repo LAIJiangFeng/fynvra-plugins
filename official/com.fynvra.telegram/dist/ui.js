@@ -1,5 +1,5 @@
 import { TELEGRAM_RATE_LIMIT_MAX } from './model.js';
-import { httpsUrl } from './types/appPluginUi.js';
+import { httpsUrl, isUiId } from './types/appPluginUi.js';
 import { asRecord } from './util.js';
 /** 最近记录最多显示几条（列表上限 200，整页 ≤ 256 KB） */
 export const RECENT_LIMIT = 50;
@@ -8,6 +8,10 @@ export const ACTIONS = {
     clearToken: 'token.clear',
     allowGroup: 'group.allow',
     removeGroup: 'group.remove',
+    addProject: 'project.add',
+    removeProject: 'project.remove',
+    setPrimary: 'project.primary',
+    saveNote: 'project.note',
     saveRateLimit: 'rateLimit.save',
     approve: 'card.approve',
     reject: 'card.reject',
@@ -47,7 +51,7 @@ const guide = (privacyOff) => [
     '1. 在 Telegram 找 @BotFather，发送 /newbot 取得 token，填到上面的 Bot Token，再把机器人拉进群。',
     '2. 群成员在群里 @机器人 就算反馈：可以提问、闲聊或反馈问题，也可以直接回复机器人的消息，或者用 /bug 命令。图片和文档可以在配文里 @机器人，也可以先发图再 @（60 秒内）或先 @ 再发图；只 @ 不写内容时，取这个人前一条或后一条消息当内容。支持图片和文档（与 Fynvra 输入框相同的格式和上限），视频、语音、贴纸等不处理，机器人会在回复里说明。',
     privacyOff ? PRIVACY_OFF : PRIVACY_ON,
-    '4. 群第一次 @机器人 后会出现在「候选群」，选好 git 工作区再点「允许」。',
+    '4. 群第一次 @机器人 后会出现在「候选群」，选好 git 工作区再点「允许」。一个群可以在「已允许的群」里添加多个项目：群消息先交给主项目分诊，属于其他项目的由 AI 自动转交（每条最多转一次，需要支持该功能的 Fynvra）。',
     '5. bug 定位到原因才会修复并开 PR；新功能要你在「待确认需求」里采纳。本机需要先运行 gh auth login 才能开 PR。',
     '6. 网络默认跟随 Fynvra 的代理设置；连不上时检查 VPN，或在「设置 → 通用 → 网络代理」改用手动代理。',
     '7. Fynvra 关着的时候不会处理群消息。',
@@ -113,23 +117,77 @@ export function buildSettingsUi(state, workspaces) {
                 ],
             }),
     }));
-    const groups = state.groups.map((group) => ({
-        key: String(group.chatId),
-        title: clip(group.title || '（无群名）', 200),
-        subtitle: clip(workspaceName(group.workspaceId), 500),
-        badges: [
-            group.active ? { text: '在群里', tone: 'success' } : { text: '已被移出群', tone: 'error' },
-        ],
-        controls: [
-            {
-                type: 'button',
-                label: '移除',
-                action: ACTIONS.removeGroup,
-                tone: 'destructive',
-                confirm: `移除「${clip(group.title, 100)}」后，这个群的反馈不再处理。确定移除？`,
-            },
-        ],
-    }));
+    // 每个群一个子区：群本身（添加项目、移除群）+ 项目列表（说明、设为主项目、移除）
+    const groups = state.groups.map((group) => {
+        const unbound = gitOptions.filter((option) => !group.projects.some((p) => p.workspaceId === option.value));
+        const groupItem = {
+            key: String(group.chatId),
+            title: clip(group.title || '（无群名）', 200),
+            subtitle: `绑定 ${group.projects.length} 个项目；群消息先交给主项目分诊，属于其他项目的由 AI 自动转交`,
+            badges: [
+                group.active ? { text: '在群里', tone: 'success' } : { text: '已被移出群', tone: 'error' },
+            ],
+            controls: [
+                ...(unbound.length > 0
+                    ? [
+                        {
+                            type: 'field',
+                            id: 'workspace',
+                            label: '添加项目',
+                            kind: 'select',
+                            options: unbound,
+                        },
+                        { type: 'button', label: '添加项目', action: ACTIONS.addProject },
+                    ]
+                    : []),
+                {
+                    type: 'button',
+                    label: '移除群',
+                    action: ACTIONS.removeGroup,
+                    tone: 'destructive',
+                    confirm: `移除「${clip(group.title, 100)}」后，这个群的反馈不再处理。确定移除？`,
+                },
+            ],
+        };
+        const projects = group.projects.map((project, index) => ({
+            key: projectKey(group.chatId, project.workspaceId, index),
+            title: clip(workspaceName(project.workspaceId), 200),
+            ...(index === 0 ? { badges: [{ text: '主项目', tone: 'success' }] } : {}),
+            controls: [
+                {
+                    type: 'field',
+                    id: 'note',
+                    label: '说明',
+                    kind: 'text',
+                    value: project.note,
+                    placeholder: '这个项目管什么（给 AI 判断转交用，可不填，最多 200 字）',
+                    action: ACTIONS.saveNote,
+                },
+                ...(index > 0
+                    ? [{ type: 'button', label: '设为主项目', action: ACTIONS.setPrimary }]
+                    : []),
+                ...(group.projects.length > 1
+                    ? [
+                        {
+                            type: 'button',
+                            label: '移除',
+                            action: ACTIONS.removeProject,
+                            tone: 'destructive',
+                            confirm: `从「${clip(group.title, 100)}」移除项目「${clip(workspaceName(project.workspaceId), 100)}」？`,
+                        },
+                    ]
+                    : []),
+            ],
+        }));
+        return {
+            type: 'section',
+            title: clip(group.title || '（无群名）', 200),
+            children: [
+                { type: 'list', items: [groupItem] },
+                { type: 'list', items: projects },
+            ],
+        };
+    });
     const pending = state.cards
         .filter((card) => card.status === 'pending-approval')
         .map((card) => ({
@@ -175,7 +233,7 @@ export function buildSettingsUi(state, workspaces) {
             {
                 type: 'section',
                 title: '已允许的群',
-                children: [{ type: 'list', empty: '还没有允许的群', items: groups }],
+                children: groups.length > 0 ? groups : [{ type: 'text', text: '还没有允许的群', tone: 'muted' }],
             },
             {
                 type: 'section',
@@ -212,6 +270,31 @@ export function buildSettingsUi(state, workspaces) {
         ],
     };
 }
+/**
+ * 项目行的 key：`<群 id>:<工作区 id>`；超出 UI key 的格式（例如太长）时改用 `<群 id>:.<序号>`
+ * （工作区 id 不含 `.`，不会混淆）。
+ */
+export function projectKey(chatId, workspaceId, index) {
+    const key = `${chatId}:${workspaceId}`;
+    return isUiId(key) ? key : `${chatId}:.${index}`;
+}
+/** 把项目行的 key 解析回群 id 与工作区 id（序号按当前状态查） */
+function parseProjectKey(service, itemKey) {
+    if (typeof itemKey !== 'string')
+        return null;
+    const match = /^(-?\d{1,20}):(.+)$/.exec(itemKey);
+    const chatId = intKey(match?.[1]);
+    const rest = match?.[2];
+    if (chatId === null || rest === undefined)
+        return null;
+    if (!rest.startsWith('.'))
+        return { chatId, workspaceId: rest };
+    const group = service.getState().groups.find((g) => g.chatId === chatId);
+    const workspaceId = /^\.\d{1,4}$/.test(rest)
+        ? group?.projects[Number(rest.slice(1))]?.workspaceId
+        : undefined;
+    return workspaceId === undefined ? null : { chatId, workspaceId };
+}
 /** itemKey 是整数 id（群 id 可为负） */
 function intKey(itemKey) {
     if (typeof itemKey !== 'string' || !/^-?\d{1,20}$/.test(itemKey))
@@ -247,6 +330,31 @@ export async function handleUiAction(service, raw) {
         case ACTIONS.removeGroup: {
             const chatId = intKey(itemKey);
             return chatId === null ? { ok: false, error: '群不存在' } : service.removeGroup(chatId);
+        }
+        case ACTIONS.addProject: {
+            const chatId = intKey(itemKey);
+            const workspaceId = values.workspace;
+            if (chatId === null)
+                return { ok: false, error: '群不存在' };
+            if (typeof workspaceId !== 'string' || workspaceId === '') {
+                return { ok: false, error: '请先选择工作区' };
+            }
+            return service.addProject(chatId, workspaceId);
+        }
+        case ACTIONS.removeProject:
+        case ACTIONS.setPrimary:
+        case ACTIONS.saveNote: {
+            const ref = parseProjectKey(service, itemKey);
+            if (!ref)
+                return { ok: false, error: '项目不存在' };
+            if (action === ACTIONS.removeProject)
+                return service.removeProject(ref.chatId, ref.workspaceId);
+            if (action === ACTIONS.setPrimary)
+                return service.setPrimaryProject(ref.chatId, ref.workspaceId);
+            const note = values.note;
+            if (typeof note !== 'string')
+                return { ok: false, error: '说明格式不对' };
+            return service.setProjectNote(ref.chatId, ref.workspaceId, note);
         }
         case ACTIONS.saveRateLimit: {
             const perHour = values.rateLimit;

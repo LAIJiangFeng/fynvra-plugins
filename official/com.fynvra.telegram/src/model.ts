@@ -37,6 +37,7 @@ export interface TelegramCardView {
   chatId: number;
   /** 来源群名（只在电脑上显示，PR 说明里不写） */
   groupTitle: string;
+  /** 最终处理这条反馈的项目（转交后是目标项目） */
   workspaceId: string;
   kind?: TelegramCardKind;
   status: TelegramCardStatus;
@@ -64,8 +65,8 @@ export interface TelegramCandidateView {
 export interface TelegramGroupView {
   chatId: number;
   title: string;
-  workspaceId: string;
-  triageSessionId: string;
+  /** 绑定的项目，第一个是主项目 */
+  projects: { workspaceId: string; note: string }[];
   /** 机器人被移出群后为 false，停止投递 */
   active: boolean;
 }

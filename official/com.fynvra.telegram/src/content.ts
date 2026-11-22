@@ -39,7 +39,13 @@ export interface TriageItemInput {
   attachments?: number;
   /** 未处理附件的汇总（rejectionSummary，文件名来自用户）；空串或缺省表示没有 */
   rejected?: string;
+  /** 本群绑定的其他项目（名称取自工作区、说明由维护者填写，都是可信内容）；缺省或空表示不列 */
+  otherProjects?: { name: string; note: string }[];
+  /** 这条反馈由哪个项目的分诊转交过来 */
+  forwardedFrom?: string;
 }
+
+const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim();
 
 /**
  * 投给 triage 会话的正文：说明在 `<untrusted-content>` 之外，外部文本全在里面并转义。
@@ -73,6 +79,19 @@ export function triagePrompt(item: TriageItemInput): string {
     `已追问 ${rounds}/${MAX_FOLLOW_UPS} 轮`,
     '本条目调用 triage_report 恰好一次（call triage_report exactly once for this item）。',
     'title、summary、evidence 不要写群成员的名字或昵称，用「群成员」或「用户」代替；也不要复述截图或附件里的链接、凭证、个人信息。',
+    ...(item.forwardedFrom
+      ? [
+          `这条反馈由「${oneLine(item.forwardedFrom)}」的分诊判断属于本项目，请直接在本项目处理，不要再填 project。`,
+        ]
+      : []),
+    ...(item.otherProjects?.length
+      ? [
+          '本群还绑定了下列其他项目。如果这条反馈明显属于其中某个项目，在 triage_report 里把 project 填成该项目名（照抄下面的名称），这条反馈会转给那个项目处理，这次的 reply 不会发到群里；属于本项目或拿不准时不要填 project：',
+          ...item.otherProjects.map(
+            (p) => `- ${oneLine(p.name)}${oneLine(p.note) ? `：${oneLine(p.note)}` : ''}`
+          ),
+        ]
+      : []),
     '',
     '<untrusted-content source="telegram">',
     body,
@@ -150,6 +169,8 @@ export interface ParsedTriageReport {
   evidence?: string;
   assessment?: string;
   needInfo: boolean;
+  /** 分诊判断反馈属于本群的另一个项目时填的项目名；旧版 Fynvra 没有这个字段 */
+  project?: string;
 }
 
 const LIMITS = { title: 200, summary: 4_000, reply: 3_000, evidence: 4_000, assessment: 4_000 };
@@ -181,6 +202,9 @@ export function parseTriageInput(raw: unknown): ParsedTriageReport | string {
   if (evidence) report.evidence = evidence;
   const assessment = str('assessment')?.trim();
   if (assessment) report.assessment = assessment;
+  // 非字符串或空串按没填处理，不报错
+  const project = typeof r.project === 'string' ? r.project.slice(0, 200).trim() : '';
+  if (project) report.project = project;
   return report;
 }
 
