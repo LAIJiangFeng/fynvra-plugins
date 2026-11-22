@@ -1,0 +1,2 @@
+# 根目录 .gitignore 忽略 dist/；本插件的 dist 是要提交的构建产物
+!dist/

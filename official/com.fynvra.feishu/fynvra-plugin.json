@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "com.fynvra.feishu",
+  "name": "飞书群反馈值班",
+  "version": "0.1.0",
+  "description": "在飞书群里 @机器人 或私聊机器人反馈问题：自动分诊、追问，定位到原因的 bug 由值班会话修复并开 PR，新功能需你在设置页采纳。回复先经过 Fynvra 的出站过滤。",
+  "author": "Fynvra",
+  "license": "Apache-2.0",
+  "kind": "fynvra",
+  "host": { "main": "dist/index.js" },
+  "permissions": ["notifications", "network", "workspaces", "channel", "ui"],
+  "engines": { "fynvra": ">=0.1.0" }
+}
