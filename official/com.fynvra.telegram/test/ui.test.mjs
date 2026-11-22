@@ -121,6 +121,30 @@ describe('设置页 UI 描述', () => {
     assert.equal(candidate.controls, undefined);
   });
 
+  it('隐私模式开启或关闭：连接区显示状态，使用说明给出对应提示', () => {
+    const render = (canReadAll) => {
+      const ui = buildSettingsUi(
+        { ...richState(), connection: 'connected', bot: { id: 42, username: 'fyn_bot', canReadAll } },
+        WORKSPACES
+      );
+      assert.ok(parsePluginUi(ui));
+      const nodes = walk(ui.children);
+      const privacy = nodes.find((n) => n.type === 'keyValue').items.find((i) => i.label === '隐私模式');
+      const guide = ui.children.at(-1).children[0].text;
+      return { value: privacy.value, guide };
+    };
+    const on = render(false);
+    assert.equal(on.value, '开启');
+    assert.match(on.guide, /\/setprivacy → 选择机器人 → Disable/);
+    assert.match(on.guide, /移出群再重新拉进来/);
+    assert.match(on.guide, /群管理员/);
+    assert.match(on.guide, /「配文里 @」和「回复机器人」在隐私模式下也能用/);
+    const off = render(true);
+    assert.equal(off.value, '关闭');
+    assert.match(off.guide, /只在内存里暂存每个人最近 60 秒的消息/);
+    assert.doesNotMatch(off.guide, /setprivacy/);
+  });
+
   it('各种连接状态与空数据都能通过校验', () => {
     for (const connection of ['no-token', 'connecting', 'connected', 'unauthorized', 'conflict', 'api-error']) {
       const ui = buildSettingsUi(

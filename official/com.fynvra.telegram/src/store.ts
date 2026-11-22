@@ -70,7 +70,7 @@ export interface StoredCard {
 export interface TelegramData {
   /** 只在内存里；落盘时去掉 */
   token?: string;
-  bot?: { id: number; username: string };
+  bot?: { id: number; username: string; canReadAll?: boolean };
   candidates: StoredCandidate[];
   groups: StoredGroup[];
   workspaces: Record<string, StoredWorkspace>;
@@ -196,7 +196,11 @@ export function parseTelegramData(raw: unknown): TelegramData {
   if (typeof r.token === 'string' && TELEGRAM_TOKEN_PATTERN.test(r.token)) data.token = r.token;
   const bot = asRecord(r.bot);
   if (bot && isInt(bot.id) && typeof bot.username === 'string') {
-    data.bot = { id: bot.id, username: bot.username };
+    data.bot = {
+      id: bot.id,
+      username: bot.username,
+      ...(typeof bot.canReadAll === 'boolean' ? { canReadAll: bot.canReadAll } : {}),
+    };
   }
   data.candidates = list(r.candidates, parseCandidate).slice(-MAX_CANDIDATES);
   const seenGroups = new Set<number>();

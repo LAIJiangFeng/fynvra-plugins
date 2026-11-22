@@ -74,7 +74,7 @@ export interface TelegramStateView {
   connection: TelegramConnection;
   /** token 的掩码（如 `123456:AB…yz`）；没有 token 时缺省 */
   tokenMasked?: string;
-  bot?: { id: number; username: string };
+  bot?: { id: number; username: string; canReadAll?: boolean };
   candidates: TelegramCandidateView[];
   groups: TelegramGroupView[];
   /** 新的在前 */

@@ -98,7 +98,7 @@ export interface TgUpdate {
 }
 
 export interface TelegramApi {
-  getMe(token: string, signal?: AbortSignal): Promise<{ id: number; username: string }>;
+  getMe(token: string, signal?: AbortSignal): Promise<{ id: number; username: string; canReadAll?: boolean }>;
   getUpdates(token: string, offset: number, signal?: AbortSignal): Promise<TgUpdate[]>;
   sendMessage(
     token: string,
@@ -207,7 +207,12 @@ export function createTelegramApi(options: TelegramApiOptions): TelegramApi {
       if (typeof user?.id !== 'number' || typeof user.username !== 'string') {
         throw new TelegramApiError('api', 'getMe: unexpected response');
       }
-      return { id: user.id, username: user.username };
+      // can_read_all_group_messages 为 true 表示隐私模式已关闭
+      return {
+        id: user.id,
+        username: user.username,
+        canReadAll: user.can_read_all_group_messages === true,
+      };
     },
     async getUpdates(token, offset, signal) {
       const result = await call(

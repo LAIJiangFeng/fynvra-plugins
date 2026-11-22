@@ -75,6 +75,16 @@ const ITEM_TEXT_MAX = 4_000;
 const ATTACHMENT_ONLY_TEXT = '（只发了附件，没有文字）';
 /** 宿主 channel.createSession 的标题上限 */
 const SESSION_TITLE_MAX = 200;
+/** 只 @ 了机器人、前后都没有内容时的正文 */
+const EMPTY_MENTION_TEXT = '（只 @ 了机器人，没有写内容）';
+/** 反馈投递后又发了附件（R5）时的正文开头 */
+const SUPPLEMENT_TEXT = '（补充了附件）';
+/** 普通消息缓冲窗口：只在内存里，用来拼接同一人的 @ 或回复 */
+export const CONTEXT_WINDOW_MS = 60_000;
+/** 有正文、没有附件的条目投递前等图的时间（R4） */
+export const ATTACH_WAIT_MS = 8_000;
+const BUFFER_PER_SENDER = 10;
+const BUFFER_SENDERS_PER_GROUP = 200;
 
 /** 还在分诊阶段、回复它就是对这张卡片的追问回复的状态；其余状态的卡片被回复时按新反馈处理 */
 const RETRIAGE_STATUSES: ReadonlySet<TelegramCardStatus> = new Set([
@@ -97,6 +107,8 @@ export interface TelegramServiceDeps {
   debounceMs?: number;
   /** 收到 channel.orchestrationChanged 后合并多久再查（缺省 300 ms） */
   orchestrationDelayMs?: number;
+  /** 有正文无附件的条目等图多久（缺省 8 秒） */
+  attachWaitMs?: number;
 }
 
 export interface TelegramService {
@@ -143,6 +155,23 @@ interface QueuedItem {
   /** 最后一条消息的时间（消息自带的发送时间，ms） */
   lastDate: number;
   readyAt: number;
+  /** 已开始下载或投递：不再并入新消息 */
+  started?: boolean;
+  /** 只 @ 了机器人、没有内容：等同一人的下一条消息（R3），readyAt 是等待截止时间 */
+  awaiting?: boolean;
+  /** 这个条目最后落到哪张卡片（triage_report 或 unreported 时写入；在途副本共用同一个对象） */
+  outcome: { cardId?: number };
+  /** R5 补充附件：投递时按「回复了来源条目的卡片」路由 */
+  supplementOf?: { cardId?: number };
+}
+
+/** 缓冲里的普通消息：只存文字和附件引用，不落盘、不下载 */
+interface BufferedMessage {
+  messageId: number;
+  date: number;
+  text: string;
+  files: ItemAttachments;
+  hasFiles: boolean;
 }
 
 interface InflightItem extends QueuedItem {
@@ -187,6 +216,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
   const now = deps.now ?? Date.now;
   const debounceMs = deps.debounceMs ?? DEBOUNCE_MS;
   const orchestrationDelayMs = deps.orchestrationDelayMs ?? 300;
+  const attachWaitMs = deps.attachWaitMs ?? ATTACH_WAIT_MS;
   const wait =
     deps.sleep ??
     ((ms: number, signal: AbortSignal) =>
@@ -214,6 +244,10 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
   const chatTimers = new Map<number, Timer>();
   const pumping = new Set<number>();
   const inflight = new Map<string, InflightItem>();
+  /** 每个群、每个发送者最近 60 秒的普通消息（只在内存里；Map 的顺序即最近活跃顺序） */
+  const buffers = new Map<number, Map<number, BufferedMessage[]>>();
+  /** 每个群、每个发送者最近一次开始投递的反馈条目（R5） */
+  const recent = new Map<number, Map<number, { outcome: { cardId?: number }; at: number }>>();
   const rate = new Map<number, number[]>();
   /** 每人上一次收到限流提示的消息时间；一个限流窗口内只提示一次 */
   const rateNoticed = new Map<number, number>();
@@ -243,7 +277,57 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
   const dropQueue = (chatId: number) => {
     discardFiles(queues.get(chatId) ?? []);
     queues.delete(chatId);
+    buffers.delete(chatId);
+    recent.delete(chatId);
   };
+
+  /** 丢掉超过 60 秒的缓冲与 R5 记录（缓冲按消息时间，R5 按本机时间） */
+  const pruneContext = (chatId: number, messageTime: number) => {
+    const senders = buffers.get(chatId);
+    for (const [fromId, list] of senders ?? []) {
+      const kept = list.filter((m) => messageTime - m.date <= CONTEXT_WINDOW_MS);
+      if (kept.length === 0) senders?.delete(fromId);
+      else senders?.set(fromId, kept);
+    }
+    if (senders?.size === 0) buffers.delete(chatId);
+    const records = recent.get(chatId);
+    for (const [fromId, record] of records ?? []) {
+      if (now() - record.at > CONTEXT_WINDOW_MS) records?.delete(fromId);
+    }
+    if (records?.size === 0) recent.delete(chatId);
+  };
+
+  const bufferMessage = (chatId: number, fromId: number, entry: BufferedMessage) => {
+    const senders = buffers.get(chatId) ?? new Map<number, BufferedMessage[]>();
+    const list = senders.get(fromId) ?? [];
+    list.push(entry);
+    if (list.length > BUFFER_PER_SENDER) list.splice(0, list.length - BUFFER_PER_SENDER);
+    // 重新插入：最近活跃的发送者排在最后，超出时丢最久没说话的
+    senders.delete(fromId);
+    senders.set(fromId, list);
+    for (const oldest of senders.keys()) {
+      if (senders.size <= BUFFER_SENDERS_PER_GROUP) break;
+      senders.delete(oldest);
+    }
+    buffers.set(chatId, senders);
+  };
+
+  /** 取出同一发送者在 time 之前 60 秒内的缓冲（按时间顺序），不移除 */
+  const bufferedBefore = (chatId: number, fromId: number, time: number) =>
+    (buffers.get(chatId)?.get(fromId) ?? []).filter(
+      (m) => m.date <= time && time - m.date <= CONTEXT_WINDOW_MS
+    );
+
+  const unbuffer = (chatId: number, fromId: number, used: readonly BufferedMessage[]) => {
+    const senders = buffers.get(chatId);
+    const left = (senders?.get(fromId) ?? []).filter((m) => !used.includes(m));
+    if (left.length > 0) senders?.set(fromId, left);
+    else senders?.delete(fromId);
+  };
+
+  const hasFiles = (item: QueuedItem) => item.files.refs.length + item.files.rejected.length > 0;
+  /** 投递前等多久：已带附件的 3 秒，只有文字的多等一会儿图（R4） */
+  const readyDelay = (item: QueuedItem) => (hasFiles(item) ? debounceMs : attachWaitMs);
 
   // ---------- 状态与落盘 ----------
 
@@ -281,6 +365,9 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
 
   const cardById = (id: number) => data.cards.find((card) => card.id === id);
   const groupOf = (chatId: number) => data.groups.find((group) => group.chatId === chatId);
+  /** 回复了某张卡片：还在分诊阶段的算追问回复，其余按新反馈并把它作背景 */
+  const routeOf = (card: StoredCard): { cardId?: number; contextCardId?: number } =>
+    RETRIAGE_STATUSES.has(card.status) ? { cardId: card.id } : { contextCardId: card.id };
   const groupOfSession = (sessionId: string) =>
     data.groups.find((group) => group.triageSessionId === sessionId);
   const workspaceOfDuty = (sessionId: string): string | undefined =>
@@ -452,19 +539,35 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     );
   };
 
+  /**
+   * 下一个可以投递的条目：每个发送者只看他最早的一条（保持同一人内的顺序），
+   * 未就绪的不挡住别人已就绪的；都没就绪时返回最早的就绪时间。
+   */
+  const pickReady = (queue: readonly QueuedItem[]): { item?: QueuedItem; wake: number } => {
+    const seen = new Set<number>();
+    let wake = Number.POSITIVE_INFINITY;
+    for (const item of queue) {
+      if (seen.has(item.fromId)) continue;
+      seen.add(item.fromId);
+      if (item.readyAt <= now()) return { item, wake: 0 };
+      wake = Math.min(wake, item.readyAt);
+    }
+    return { wake };
+  };
+
   const pumpChat = async (chatId: number): Promise<void> => {
     if (pumping.has(chatId) || stopped) return;
     const queue = queues.get(chatId);
-    const head = queue?.[0];
-    if (!queue || !head) return;
+    if (!queue || queue.length === 0) return;
     const group = groupOf(chatId);
     if (!group?.active) {
       dropQueue(chatId);
       return;
     }
     if (inflight.has(group.triageSessionId)) return;
-    if (head.readyAt > now()) {
-      scheduleChat(chatId, head.readyAt - now());
+    const next = pickReady(queue);
+    if (!next.item) {
+      scheduleChat(chatId, next.wake - now());
       return;
     }
     pumping.add(chatId);
@@ -477,8 +580,26 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       const sessionId = group.triageSessionId;
       if ((await statusOf(sessionId)) !== 'idle') return; // 忙：结束或 idle 事件后再投
       await refreshCheckout(group.workspaceId);
-      const item = queue[0];
+      const item = pickReady(queue).item;
       if (!item || inflight.has(sessionId)) return;
+      if (item.awaiting) {
+        // 60 秒没等到后一条：用占位正文投递，让 AI 追问
+        item.awaiting = false;
+        item.texts = [EMPTY_MENTION_TEXT];
+      }
+      if (item.supplementOf) {
+        // 来源条目这一轮已结束（同一个分诊会话串行），卡片已定：按回复该卡片路由
+        const source = item.supplementOf.cardId;
+        const card = source === undefined ? undefined : cardById(source);
+        if (card) Object.assign(item, routeOf(card));
+        delete item.supplementOf;
+      }
+      if (!item.started) {
+        item.started = true;
+        const records = recent.get(chatId) ?? new Map();
+        records.set(item.fromId, { outcome: item.outcome, at: now() });
+        recent.set(chatId, records);
+      }
       if (!item.downloaded) {
         const token = data.token;
         item.downloaded = token
@@ -495,7 +616,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
               rejected: item.files.refs.map((ref) => ({ name: ref.name, reason: 'download-failed' })),
             };
         // 下载期间条目被丢弃（群被移除、服务停止等）：文件随之删除
-        if (stopped || queues.get(chatId)?.[0] !== item) {
+        if (stopped || !queues.get(chatId)?.includes(item)) {
           discardFiles([item]);
           return;
         }
@@ -554,8 +675,9 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
         if (!isBusy(statuses.get(sessionId))) statuses.set(sessionId, 'running');
         // 核心已在 prompt 内读完附件
         discardFiles([item]);
-        queue.shift();
-        if (queue.length === 0) queues.delete(chatId);
+        const at = queue.indexOf(item);
+        if (at >= 0) queue.splice(at, 1);
+        if (queue.length === 0 && queues.get(chatId) === queue) queues.delete(chatId);
         return;
       }
       inflight.delete(sessionId);
@@ -584,6 +706,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     if (item.cardId !== undefined) {
       // 追问回复：卡片状态不变，只发兜底
       const existing = cardById(item.cardId);
+      item.outcome.cardId = item.cardId;
       if (existing) reply(existing);
       return;
     }
@@ -604,6 +727,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       updatedAt: time,
     };
     addCard(card);
+    item.outcome.cardId = card.id;
     commit();
     reply(card);
   };
@@ -636,6 +760,11 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       queues.set(to, queue);
     }
     for (const item of inflight.values()) if (item.chatId === from) item.chatId = to;
+    for (const map of [buffers, recent] as Map<number, unknown>[]) {
+      const entry = map.get(from);
+      map.delete(from);
+      if (entry) map.set(to, entry);
+    }
     commit();
   };
 
@@ -682,22 +811,17 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     const mediaGroupId =
       typeof message.media_group_id === 'string' ? message.media_group_id : undefined;
     const queue = queues.get(chat.id) ?? [];
-    const tail = queue[queue.length - 1];
-    // 已开始下载或投递的条目不再并入
-    const last =
-      tail && !tail.downloaded && !(pumping.has(chat.id) && tail === queue[0]) ? tail : undefined;
-    if (
-      mediaGroupId !== undefined &&
-      last?.mediaGroupId === mediaGroupId &&
-      last.fromId === from.id
-    ) {
+    pruneContext(chat.id, time);
+    // 这个人还没开始投递的最新条目（已开始下载或投递的不再并入）
+    const open = [...queue].reverse().find((item) => item.fromId === from.id && !item.started);
+    if (mediaGroupId !== undefined && open?.mediaGroupId === mediaGroupId) {
       // 相册的其余消息（通常没有配文和 @）：并入同一人同一相册的条目，不再计限流
-      if (text.trim()) last.texts.push(text.trim().slice(0, ITEM_TEXT_MAX));
-      last.messageIds.push(message.message_id);
-      mergeAttachments(last.files, files);
-      last.lastDate = time;
-      last.readyAt = now() + debounceMs;
-      scheduleChat(chat.id, debounceMs);
+      if (text.trim()) open.texts.push(text.trim().slice(0, ITEM_TEXT_MAX));
+      open.messageIds.push(message.message_id);
+      mergeAttachments(open.files, files);
+      open.lastDate = time;
+      open.readyAt = now() + debounceMs;
+      scheduleChat(chat.id, 0);
       return;
     }
     if (!text && !attachments) return;
@@ -712,61 +836,148 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       const card = data.cards.find(
         (c) => c.chatId === chat.id && c.botMessageIds.includes(repliedId)
       );
-      if (card) {
-        target = RETRIAGE_STATUSES.has(card.status)
-          ? { cardId: card.id }
-          : { contextCardId: card.id };
-      }
+      if (card) target = routeOf(card);
     } else {
       // /bug[@bot] 优先，其次 @本 bot；其余消息丢弃
       body =
         parseBugCommand(text, bot.username) ??
         parseBotMention(text, entities, bot.username);
     }
-    if (body === '' && attachments) body = ATTACHMENT_ONLY_TEXT;
-    if (!body) return;
-    if (rateLimited(from.id, time)) {
+    const caption = text.trim();
+
+    /** 把这条消息并入已有条目，重新计算投递时间 */
+    const mergeInto = (item: QueuedItem, content: string) => {
+      if (content) item.texts.push(content.slice(0, ITEM_TEXT_MAX));
+      item.messageIds.push(message.message_id);
+      mergeAttachments(item.files, files);
+      if (mediaGroupId !== undefined) item.mediaGroupId = mediaGroupId;
+      item.lastDate = time;
+      item.readyAt = now() + readyDelay(item);
+      scheduleChat(chat.id, 0);
+    };
+    /** 并入的后一条：标明来源（插件生成的说明，用户原文接在后面） */
+    const after = (content: string) =>
+      content
+        ? `（以下是该用户在 @ 后发的消息）\n${content}`
+        : attachments
+          ? '（该用户在 @ 后发的附件已并入本条）'
+          : '';
+    const limited = () => {
+      if (!rateLimited(from.id, time)) return false;
       const noticed = rateNoticed.get(from.id);
       if (noticed === undefined || time - noticed > HOUR_MS) {
         rateNoticed.set(from.id, time);
         void notifyRateLimited(chat.id, message.message_id);
       }
-      return;
-    }
-    if (
-      last &&
-      last.fromId === from.id &&
-      last.cardId === target.cardId &&
-      last.contextCardId === target.contextCardId &&
-      time - last.lastDate <= DEBOUNCE_MS
-    ) {
-      // 同一人 3 秒内连续发的合成一条
-      last.texts.push(body.slice(0, ITEM_TEXT_MAX));
-      last.messageIds.push(message.message_id);
-      mergeAttachments(last.files, files);
-      if (mediaGroupId !== undefined) last.mediaGroupId = mediaGroupId;
-      last.lastDate = time;
-      last.readyAt = now() + debounceMs;
-    } else {
-      queue.push({
-        chatId: chat.id,
-        ...target,
-        fromId: from.id,
-        sender: displayName(from),
-        messageIds: [message.message_id],
-        replyTo: message.message_id,
-        texts: [body.slice(0, ITEM_TEXT_MAX)],
-        files,
-        ...(mediaGroupId !== undefined ? { mediaGroupId } : {}),
-        lastDate: time,
-        readyAt: now() + debounceMs,
-      });
+      return true;
+    };
+    const enqueue = (item: QueuedItem) => {
+      queue.push(item);
       if (queue.length > MAX_QUEUE_PER_GROUP) {
         discardFiles(queue.splice(0, queue.length - MAX_QUEUE_PER_GROUP));
       }
+      queues.set(chat.id, queue);
+      scheduleChat(chat.id, 0);
+    };
+    const newItem = (texts: string[]): QueuedItem => ({
+      chatId: chat.id,
+      fromId: from.id,
+      sender: displayName(from),
+      messageIds: [message.message_id],
+      replyTo: message.message_id,
+      texts,
+      files: { refs: [], rejected: [] },
+      ...(mediaGroupId !== undefined ? { mediaGroupId } : {}),
+      lastDate: time,
+      readyAt: now(),
+      outcome: {},
+    });
+
+    // R3：等待中的空 @ 收到同一人的下一条（普通消息或反馈都算），并入后按正常节奏投递；不另计限流
+    if (open?.awaiting && now() < open.readyAt) {
+      const content = after(body ?? caption);
+      if (!content) {
+        open.messageIds.push(message.message_id); // 又一个空 @：继续等
+        return;
+      }
+      open.awaiting = false;
+      mergeInto(open, content);
+      return;
     }
-    queues.set(chat.id, queue);
-    scheduleChat(chat.id, debounceMs);
+
+    if (body === null) {
+      // 普通消息
+      if (open && !open.awaiting && attachments) {
+        // R4：还没投递的条目在等图，附件和配文一起并入
+        mergeInto(open, after(caption));
+        return;
+      }
+      const source = recent.get(chat.id)?.get(from.id);
+      if (!open && attachments && source && now() - source.at <= CONTEXT_WINDOW_MS) {
+        // R5：反馈投递后 60 秒内补发的附件，按回复该卡片处理；计入限流
+        if (limited()) return;
+        const item = newItem([`${SUPPLEMENT_TEXT}${caption}`.slice(0, ITEM_TEXT_MAX)]);
+        mergeAttachments(item.files, files);
+        item.supplementOf = source.outcome;
+        item.readyAt = now() + readyDelay(item);
+        enqueue(item);
+        return;
+      }
+      // 其余只暂存在内存里，等这个人自己的 @ 或回复来取
+      bufferMessage(chat.id, from.id, {
+        messageId: message.message_id,
+        date: time,
+        text: caption.slice(0, ITEM_TEXT_MAX),
+        files,
+        hasFiles: attachments,
+      });
+      return;
+    }
+
+    if (limited()) return;
+    if (
+      open &&
+      !open.awaiting &&
+      open.cardId === target.cardId &&
+      open.contextCardId === target.contextCardId &&
+      time - open.lastDate <= DEBOUNCE_MS
+    ) {
+      // 同一人 3 秒内连续发的合成一条
+      mergeInto(open, body || (attachments ? ATTACHMENT_ONLY_TEXT : ''));
+      return;
+    }
+
+    // R2：并入同一人前 60 秒内缓冲的普通消息——附件一律并入，文字只在本条正文为空时取最近一条
+    const item = Object.assign(newItem([]), target);
+    const earlier = bufferedBefore(chat.id, from.id, time);
+    const withFiles = earlier.filter((m) => m.hasFiles);
+    const prevText = body ? undefined : earlier.filter((m) => m.text).at(-1);
+    const used = [...new Set([...withFiles, ...(prevText ? [prevText] : [])])].sort(
+      (a, b) => a.date - b.date || a.messageId - b.messageId
+    );
+    for (const m of withFiles) mergeAttachments(item.files, m.files);
+    mergeAttachments(item.files, files);
+    const ago = (m: BufferedMessage) => Math.max(0, Math.round((time - m.date) / 1000));
+    if (body) item.texts.push(body.slice(0, ITEM_TEXT_MAX));
+    else if (prevText) {
+      item.texts.push(`（以下是该用户在 @ 前 ${ago(prevText)} 秒发的消息）\n${prevText.text}`);
+    } else if (hasFiles(item)) item.texts.push(ATTACHMENT_ONLY_TEXT);
+    const first = withFiles[0];
+    if (first) {
+      item.texts.push(
+        `（该用户在 @ 前 ${ago(first)} 秒内发的 ${withFiles.length} 条图片/文件消息已并入本条）`
+      );
+    }
+    item.messageIds = [...used.map((m) => m.messageId), message.message_id];
+    unbuffer(chat.id, from.id, used);
+    if (item.texts.length === 0) {
+      // R3：前面也没有内容，等这个人的后一条
+      item.awaiting = true;
+      item.readyAt = now() + CONTEXT_WINDOW_MS;
+    } else {
+      item.readyAt = now() + readyDelay(item);
+    }
+    enqueue(item);
   };
 
   const handleUpdate = (update: TgUpdate) => {
@@ -916,6 +1127,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       };
       addCard(card);
     }
+    item.outcome.cardId = card.id;
     card.kind = report.kind;
     card.title = title;
     card.summary = summary;
@@ -1269,6 +1481,8 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       await checkPullRequests(workspaceId);
       await pumpDuty(workspaceId);
     }
+    // 没人再说话的群：缓冲也要过期即删
+    for (const chatId of new Set([...buffers.keys(), ...recent.keys()])) pruneContext(chatId, now());
     for (const chatId of queues.keys()) void pumpChat(chatId);
   }
 
@@ -1318,6 +1532,8 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       chatTimers.clear();
       prChecks.clear();
       for (const queue of queues.values()) discardFiles(queue);
+      buffers.clear();
+      recent.clear();
       for (const off of unsubscribes.splice(0)) off();
       await stopPolling();
       await lastWrite;
@@ -1342,7 +1558,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       if (typeof token !== 'string' || !TELEGRAM_TOKEN_PATTERN.test(token)) {
         return { ok: false, error: 'Bot Token 格式不对' };
       }
-      let bot: { id: number; username: string };
+      let bot: { id: number; username: string; canReadAll?: boolean };
       try {
         bot = await deps.telegram.getMe(token);
       } catch (error) {

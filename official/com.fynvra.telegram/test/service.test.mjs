@@ -80,6 +80,8 @@ function harness(options = {}) {
     now: () => time,
     sleep: async () => undefined,
     debounceMs: 0,
+    // 旧用例不等图；R4 的用例显式传 8 秒
+    attachWaitMs: options.attachWaitMs ?? 0,
     orchestrationDelayMs: 0,
   });
   services.push(service);
@@ -988,5 +990,249 @@ describe('附件', () => {
     await h.report('sA', question);
     await waitFor(() => assert.equal(h.sent.length, 1));
     assert.equal(h.sent[0].text, 'r\n\n以下附件未处理：e.txt（没有文字内容）');
+  });
+});
+
+describe('前后消息拼接（先发图再 @、先 @ 再发图、空 @）', () => {
+  const at = (text) => ({ text, ...mentions(text) });
+  const photo = (fileId, extra = {}) => ({ text: undefined, photo: [{ file_id: fileId }], ...extra });
+  const bodyOf = (prompt) => prompt.text.split('消息正文：\n')[1];
+  const firstLine = (prompt) => bodyOf(prompt).split('\n')[0];
+
+  it('先发图（无 @）→ 10 秒后单独 @：图片并入，正文是 @ 的内容', async () => {
+    const h = harness();
+    await h.service.start();
+    h.tg.files.set('pic', { data: 'img' });
+    await deliver(
+      h,
+      [
+        message(CHAT_A, 1, undefined, photo('pic', { date: 1_000 })),
+        message(CHAT_A, 1, undefined, { ...at('@fyn_bot 页面白屏'), date: 1_010 }),
+      ],
+      1
+    );
+    const [prompt] = h.prompts;
+    assert.equal(firstLine(prompt), '页面白屏');
+    assert.equal(prompt.attachments.length, 1);
+    assert.match(bodyOf(prompt), /（该用户在 @ 前 10 秒内发的 1 条图片\/文件消息已并入本条）/);
+  });
+
+  it('先发相册 3 张 → 再 @：3 张全部并入', async () => {
+    const h = harness();
+    await h.service.start();
+    const album = ['a1', 'a2', 'a3'].map((id) => {
+      h.tg.files.set(id, { data: id });
+      return message(CHAT_A, 1, undefined, photo(id, { media_group_id: 'g', date: 1_000 }));
+    });
+    await deliver(h, [...album, message(CHAT_A, 1, undefined, { ...at('@fyn_bot 看这三张'), date: 1_005 })], 1);
+    assert.equal(h.prompts[0].attachments.length, 3);
+    assert.equal(firstLine(h.prompts[0]), '看这三张');
+  });
+
+  it('先 @（有文字）→ 5 秒后发图：在 8 秒内并入同一条目，只投递一次', async () => {
+    const h = harness({ attachWaitMs: 8_000 });
+    await h.service.start();
+    h.tg.files.set('late', { data: 'img' });
+    h.tg.push([message(CHAT_A, 1, undefined, { ...at('@fyn_bot 保存失败'), date: 1_000 })]);
+    await tick(40);
+    assert.equal(h.prompts.length, 0);
+    h.advance(5_000);
+    await deliver(h, [message(CHAT_A, 1, undefined, photo('late', { caption: '截图', date: 1_005 }))], 1);
+    await tick(40);
+    assert.equal(h.prompts.length, 1);
+    assert.equal(h.prompts[0].attachments.length, 1);
+    assert.equal(firstLine(h.prompts[0]), '保存失败');
+    assert.match(bodyOf(h.prompts[0]), /（以下是该用户在 @ 后发的消息）\n截图/);
+  });
+
+  it('先 @（有文字）→ 20 秒后发图：第一条照常投递；图片按回复该卡片生成补充条目', async () => {
+    const h = harness({ attachWaitMs: 8_000 });
+    await h.service.start();
+    h.tg.files.set('late', { data: 'img' });
+    h.tg.push([message(CHAT_A, 1, undefined, { ...at('@fyn_bot 保存失败'), date: 1_000 })]);
+    await tick(40);
+    assert.equal(h.prompts.length, 0);
+    h.advance(8_000);
+    await h.service.maintain();
+    await waitFor(() => assert.equal(h.prompts.length, 1));
+    assert.equal(h.prompts[0].attachments, undefined);
+    await h.report('sA', { kind: 'bug', title: '保存失败', summary: 's', reply: '请发截图', needInfo: true });
+    h.settle('sA');
+    h.advance(12_000);
+    const supplement = message(CHAT_A, 1, undefined, photo('late', { caption: '这是截图', date: 1_020 }));
+    await deliver(h, [supplement], 2);
+    const second = h.prompts[1];
+    // 与回复追问中的卡片一致：按追问回复投给卡片 #1
+    assert.match(second.text, /条目：卡片 #1（追问回复）/);
+    assert.equal(firstLine(second), '（补充了附件）这是截图');
+    assert.equal(second.attachments.length, 1);
+    await h.report('sA', { kind: 'bug', title: '保存失败', summary: 's', reply: '看到了', evidence: 'e' });
+    assert.deepEqual(h.sent.at(-1), { chatId: CHAT_A, text: '看到了', replyTo: supplement.message.message_id });
+    assert.equal(h.service.getState().cards.length, 1);
+  });
+
+  it('补充条目：卡片已不在分诊阶段时按新反馈处理，旧卡片作背景；补充计入限流', async () => {
+    const h = harness();
+    await h.service.start();
+    assert.deepEqual(await h.service.setRateLimit(1), { ok: true });
+    h.tg.files.set('late', { data: 'img' });
+    await deliver(h, [message(CHAT_A, 1, undefined, { ...at('@fyn_bot 保存失败'), date: 1_000 })], 1);
+    await h.report('sA', { kind: 'bug', title: '保存失败', summary: 's', reply: '已定位', evidence: 'e' });
+    h.settle('sA');
+    h.tg.push([message(CHAT_A, 1, undefined, photo('late', { date: 1_020 }))]);
+    await waitFor(() => assert.equal(h.sent.at(-1).text, TEMPLATES.rateLimited));
+    assert.equal(h.prompts.filter((p) => p.sessionId === 'sA').length, 1);
+
+    const g = harness();
+    await g.service.start();
+    g.tg.files.set('late', { data: 'img' });
+    await deliver(g, [message(CHAT_A, 1, undefined, { ...at('@fyn_bot 保存失败'), date: 1_000 })], 1);
+    await g.report('sA', { kind: 'bug', title: '保存失败', summary: 's', reply: '已定位', evidence: 'e' });
+    g.settle('sA');
+    await waitFor(() => assert.ok(g.prompts.some((p) => p.sessionId === 'p1')));
+    g.tg.push([message(CHAT_A, 1, undefined, photo('late', { date: 1_020 }))]);
+    await waitFor(() => assert.equal(g.prompts.filter((p) => p.sessionId === 'sA').length, 2));
+    assert.match(g.prompts.filter((p) => p.sessionId === 'sA')[1].text, /新反馈（回复了卡片 #1）/);
+  });
+
+  it('只 @（空）且前面有该用户的文字：用前一条文字', async () => {
+    const h = harness();
+    await h.service.start();
+    await deliver(
+      h,
+      [
+        message(CHAT_A, 1, '设置页点保存没反应', { date: 1_000 }),
+        message(CHAT_A, 1, undefined, { ...at('@fyn_bot'), date: 1_012 }),
+      ],
+      1
+    );
+    assert.match(bodyOf(h.prompts[0]), /^（以下是该用户在 @ 前 12 秒发的消息）\n设置页点保存没反应/);
+  });
+
+  it('只 @（空）且前面没有：等到后一条文字或图片后并入；60 秒都没有就用占位正文', async () => {
+    const h = harness();
+    await h.service.start();
+    h.tg.push([message(CHAT_A, 1, undefined, { ...at('@fyn_bot'), date: 1_000 })]);
+    await tick(40);
+    assert.equal(h.prompts.length, 0);
+    await deliver(h, [message(CHAT_A, 1, '导出按钮报错', { date: 1_020 })], 1);
+    assert.match(bodyOf(h.prompts[0]), /^（以下是该用户在 @ 后发的消息）\n导出按钮报错/);
+
+    const p = harness();
+    await p.service.start();
+    p.tg.files.set('after', { data: 'img' });
+    p.tg.push([message(CHAT_A, 1, undefined, { ...at('@fyn_bot'), date: 1_000 })]);
+    await tick(40);
+    await deliver(p, [message(CHAT_A, 1, undefined, photo('after', { date: 1_010 }))], 1);
+    assert.equal(p.prompts[0].attachments.length, 1);
+    assert.equal(firstLine(p.prompts[0]), '（该用户在 @ 后发的附件已并入本条）');
+
+    const t = harness();
+    await t.service.start();
+    t.tg.push([message(CHAT_A, 1, undefined, { ...at('@fyn_bot'), date: 1_000 })]);
+    await tick(40);
+    t.advance(59_000);
+    await t.service.maintain();
+    await tick(20);
+    assert.equal(t.prompts.length, 0);
+    t.advance(1_000);
+    await t.service.maintain();
+    await waitFor(() => assert.equal(t.prompts.length, 1));
+    assert.equal(firstLine(t.prompts[0]), '（只 @ 了机器人，没有写内容）');
+  });
+
+  it('其他人的普通消息不会并入；超过 60 秒的缓冲不会并入', async () => {
+    const h = harness();
+    await h.service.start();
+    h.tg.files.set('other', { data: 'img' });
+    h.tg.files.set('old', { data: 'img' });
+    await deliver(
+      h,
+      [
+        message(CHAT_A, 2, undefined, photo('other', { caption: '别人的文字', date: 1_000 })),
+        message(CHAT_A, 1, undefined, photo('old', { date: 1_000 })),
+        message(CHAT_A, 1, undefined, { ...at('@fyn_bot 我的问题'), date: 1_061 }),
+      ],
+      1
+    );
+    assert.equal(h.prompts[0].attachments, undefined);
+    assert.doesNotMatch(h.prompts[0].text, /别人的文字|并入/);
+    assert.deepEqual(h.tg.calls.getFile, []);
+  });
+
+  it('被并入的缓冲不会被第二次 @ 重复使用', async () => {
+    const h = harness();
+    await h.service.start();
+    h.tg.files.set('pic', { data: 'img' });
+    await deliver(
+      h,
+      [
+        message(CHAT_A, 1, undefined, photo('pic', { date: 1_000 })),
+        message(CHAT_A, 1, undefined, { ...at('@fyn_bot 第一次'), date: 1_005 }),
+      ],
+      1
+    );
+    assert.equal(h.prompts[0].attachments.length, 1);
+    await h.report('sA', question);
+    h.settle('sA');
+    await deliver(h, [message(CHAT_A, 1, undefined, { ...at('@fyn_bot 第二次'), date: 1_010 })], 2);
+    assert.equal(h.prompts[1].attachments, undefined);
+    assert.equal(h.tg.calls.getFile.length, 1);
+  });
+
+  it('同一个群里 A 在等后一条时，B 的 @ 照常及时投递', async () => {
+    const h = harness();
+    await h.service.start();
+    await deliver(
+      h,
+      [
+        message(CHAT_A, 1, undefined, { ...at('@fyn_bot'), date: 1_000 }),
+        message(CHAT_A, 2, undefined, { ...at('@fyn_bot B 的问题'), date: 1_001 }),
+      ],
+      1
+    );
+    assert.equal(firstLine(h.prompts[0]), 'B 的问题');
+    assert.match(h.prompts[0].text, /发送者：User2/);
+    await h.report('sA', question);
+    h.settle('sA');
+    await deliver(h, [message(CHAT_A, 1, 'A 补的内容', { date: 1_010 })], 2);
+    assert.match(bodyOf(h.prompts[1]), /A 补的内容/);
+  });
+
+  it('回复机器人也适用：前面发的图并入', async () => {
+    const h = harness();
+    await h.service.start();
+    h.tg.files.set('pic', { data: 'img' });
+    await deliver(
+      h,
+      [
+        message(CHAT_A, 1, undefined, photo('pic', { date: 1_000 })),
+        message(CHAT_A, 1, '这个也不行', {
+          date: 1_005,
+          reply_to_message: { message_id: 1, from: { id: BOT_ID } },
+        }),
+      ],
+      1
+    );
+    assert.equal(firstLine(h.prompts[0]), '这个也不行');
+    assert.equal(h.prompts[0].attachments.length, 1);
+  });
+
+  it('缓冲不落盘；普通消息的附件不被并入就不下载', async () => {
+    const h = harness();
+    await h.service.start();
+    h.tg.files.set('quiet', { data: 'img' });
+    h.tg.push([
+      message(CHAT_A, 1, '普通聊天绝密XYZ', { date: 1_000 }),
+      message(CHAT_A, 1, undefined, photo('quiet', { caption: '配文绝密XYZ', date: 1_001 })),
+    ]);
+    await waitFor(() => assert.ok(h.state.writes.some((w) => w.pollOffset > 0)));
+    await tick(40);
+    assert.deepEqual(h.prompts, []);
+    assert.deepEqual(h.tg.calls.getFile, []);
+    for (const call of h.state.calls.filter((c) => c.method === 'storage.write')) {
+      assert.doesNotMatch(JSON.stringify(call.params), /绝密XYZ/);
+    }
+    assert.doesNotMatch(JSON.stringify(h.state.logs), /绝密XYZ/);
   });
 });

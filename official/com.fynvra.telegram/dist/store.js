@@ -120,7 +120,11 @@ export function parseTelegramData(raw) {
         data.token = r.token;
     const bot = asRecord(r.bot);
     if (bot && isInt(bot.id) && typeof bot.username === 'string') {
-        data.bot = { id: bot.id, username: bot.username };
+        data.bot = {
+            id: bot.id,
+            username: bot.username,
+            ...(typeof bot.canReadAll === 'boolean' ? { canReadAll: bot.canReadAll } : {}),
+        };
     }
     data.candidates = list(r.candidates, parseCandidate).slice(-MAX_CANDIDATES);
     const seenGroups = new Set();

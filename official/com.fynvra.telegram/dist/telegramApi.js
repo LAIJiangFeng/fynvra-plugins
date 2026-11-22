@@ -89,7 +89,12 @@ export function createTelegramApi(options) {
             if (typeof user?.id !== 'number' || typeof user.username !== 'string') {
                 throw new TelegramApiError('api', 'getMe: unexpected response');
             }
-            return { id: user.id, username: user.username };
+            // can_read_all_group_messages 为 true 表示隐私模式已关闭
+            return {
+                id: user.id,
+                username: user.username,
+                canReadAll: user.can_read_all_group_messages === true,
+            };
         },
         async getUpdates(token, offset, signal) {
             const result = await call(token, 'getUpdates', {

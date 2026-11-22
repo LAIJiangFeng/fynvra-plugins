@@ -57,15 +57,22 @@ const KIND_TEXT: Record<TelegramCardKind, string> = {
   invalid: '无效',
 };
 
-const GUIDE = [
-  '1. 在 Telegram 找 @BotFather，发送 /newbot 取得 token，填到上面的 Bot Token，再把机器人拉进群。',
-  '2. 群成员在群里 @机器人 就算反馈：可以提问、闲聊或反馈问题，也可以直接回复机器人的消息，或者用 /bug 命令。可以发图片或文档并在配文里 @机器人：支持图片和文档（与 Fynvra 输入框相同的格式和上限），视频、语音、贴纸等不处理，机器人会在回复里说明。',
-  '3. 如果 @ 了机器人没有反应：在 @BotFather 用 /setprivacy 关闭隐私模式，再把机器人移出群、重新拉进来；关闭后机器人能收到群里的所有消息，但插件只处理 @机器人、/bug 和回复机器人的消息，其余直接丢弃、不保存。',
-  '4. 群第一次 @机器人 后会出现在「候选群」，选好 git 工作区再点「允许」。',
-  '5. bug 定位到原因才会修复并开 PR；新功能要你在「待确认需求」里采纳。本机需要先运行 gh auth login 才能开 PR。',
-  '6. 网络默认跟随 Fynvra 的代理设置；连不上时检查 VPN，或在「设置 → 通用 → 网络代理」改用手动代理。',
-  '7. Fynvra 关着的时候不会处理群消息。',
-].join('\n');
+/** 隐私模式开启（或还不知道）时的说明 */
+const PRIVACY_ON =
+  '3. 机器人现在开着隐私模式，只能收到 /bug、@它和回复它的消息。「配文里 @」和「回复机器人」在隐私模式下也能用；「先发图再 @」「先 @ 再发图」「只 @ 不写内容」需要机器人能看到群里的普通消息，请二选一：在 @BotFather 里 /setprivacy → 选择机器人 → Disable，然后把机器人移出群再重新拉进来（修改才对已有的群生效）；或者把机器人设为群管理员。';
+const PRIVACY_OFF =
+  '3. 隐私模式已关闭：机器人能看到群里所有消息，但插件只在内存里暂存每个人最近 60 秒的消息，用来拼接他自己的 @ 或回复；不保存、不下载、不交给 AI，过期即丢。';
+
+const guide = (privacyOff: boolean) =>
+  [
+    '1. 在 Telegram 找 @BotFather，发送 /newbot 取得 token，填到上面的 Bot Token，再把机器人拉进群。',
+    '2. 群成员在群里 @机器人 就算反馈：可以提问、闲聊或反馈问题，也可以直接回复机器人的消息，或者用 /bug 命令。图片和文档可以在配文里 @机器人，也可以先发图再 @（60 秒内）或先 @ 再发图；只 @ 不写内容时，取这个人前一条或后一条消息当内容。支持图片和文档（与 Fynvra 输入框相同的格式和上限），视频、语音、贴纸等不处理，机器人会在回复里说明。',
+    privacyOff ? PRIVACY_OFF : PRIVACY_ON,
+    '4. 群第一次 @机器人 后会出现在「候选群」，选好 git 工作区再点「允许」。',
+    '5. bug 定位到原因才会修复并开 PR；新功能要你在「待确认需求」里采纳。本机需要先运行 gh auth login 才能开 PR。',
+    '6. 网络默认跟随 Fynvra 的代理设置；连不上时检查 VPN，或在「设置 → 通用 → 网络代理」改用手动代理。',
+    '7. Fynvra 关着的时候不会处理群消息。',
+  ].join('\n');
 
 const NETWORK_HINT =
   '连不上 api.telegram.org：请确认 VPN 或代理已开启；网络代理默认跟随系统代理，也可以在「设置 → 通用 → 网络代理」改用手动代理';
@@ -86,6 +93,9 @@ export function buildSettingsUi(state: TelegramStateView, workspaces: PluginWork
       items: [
         { label: '状态', value: CONNECTION_TEXT[state.connection] },
         ...(state.bot ? [{ label: '机器人', value: `@${state.bot.username}` }] : []),
+        ...(typeof state.bot?.canReadAll === 'boolean'
+          ? [{ label: '隐私模式', value: state.bot.canReadAll ? '关闭' : '开启' }]
+          : []),
       ],
     },
   ];
@@ -232,7 +242,7 @@ export function buildSettingsUi(state: TelegramStateView, workspaces: PluginWork
         title: '最近记录',
         children: [{ type: 'list', empty: '还没有记录', items: recent }],
       },
-      { type: 'section', title: '使用说明', children: [{ type: 'text', text: GUIDE }] },
+      { type: 'section', title: '使用说明', children: [{ type: 'text', text: guide(state.bot?.canReadAll === true) }] },
     ],
   };
 }
