@@ -4,6 +4,7 @@
 import type { ChannelModelRef, FynvraPluginApi } from './types/appPluginApi.js';
 import {
   isTelegramRateLimit,
+  isThinkingLevel,
   TELEGRAM_RATE_LIMIT_DEFAULT,
   type TelegramCardKind,
   type TelegramCardStatus,
@@ -226,12 +227,15 @@ function parseCard(raw: unknown): StoredCard | null {
 const isModelId = (value: unknown): value is string =>
   typeof value === 'string' && value.length >= 1 && value.length <= 200;
 
-/** 模型引用：服务 id 与模型 id 各 1–200 字符；不合法时当作没选 */
+/** 模型引用：服务 id 与模型 id 各 1–200 字符，不合法时当作没选；档位不合法时当作没选档位，保留模型 */
 export function parseModelRef(raw: unknown): ChannelModelRef | undefined {
   const r = asRecord(raw);
-  return r && isModelId(r.providerId) && isModelId(r.modelId)
-    ? { providerId: r.providerId, modelId: r.modelId }
-    : undefined;
+  if (!r || !isModelId(r.providerId) || !isModelId(r.modelId)) return undefined;
+  return {
+    providerId: r.providerId,
+    modelId: r.modelId,
+    ...(isThinkingLevel(r.thinking) ? { thinking: r.thinking } : {}),
+  };
 }
 
 function list<T>(raw: unknown, parse: (item: unknown) => T | null): T[] {

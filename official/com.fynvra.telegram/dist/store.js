@@ -1,4 +1,4 @@
-import { isTelegramRateLimit, TELEGRAM_RATE_LIMIT_DEFAULT, } from './model.js';
+import { isTelegramRateLimit, isThinkingLevel, TELEGRAM_RATE_LIMIT_DEFAULT, } from './model.js';
 import { TELEGRAM_TOKEN_PATTERN } from './telegramApi.js';
 import { asRecord } from './util.js';
 export const MAX_CANDIDATES = 20;
@@ -141,12 +141,16 @@ function parseCard(raw) {
     return card;
 }
 const isModelId = (value) => typeof value === 'string' && value.length >= 1 && value.length <= 200;
-/** 模型引用：服务 id 与模型 id 各 1–200 字符；不合法时当作没选 */
+/** 模型引用：服务 id 与模型 id 各 1–200 字符，不合法时当作没选；档位不合法时当作没选档位，保留模型 */
 export function parseModelRef(raw) {
     const r = asRecord(raw);
-    return r && isModelId(r.providerId) && isModelId(r.modelId)
-        ? { providerId: r.providerId, modelId: r.modelId }
-        : undefined;
+    if (!r || !isModelId(r.providerId) || !isModelId(r.modelId))
+        return undefined;
+    return {
+        providerId: r.providerId,
+        modelId: r.modelId,
+        ...(isThinkingLevel(r.thinking) ? { thinking: r.thinking } : {}),
+    };
 }
 function list(raw, parse) {
     return Array.isArray(raw) ? raw.flatMap((item) => parse(item) ?? []) : [];

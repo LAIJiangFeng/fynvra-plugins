@@ -1,3 +1,14 @@
+/** 思考档位，顺序同 Fynvra 输入框 */
+export const THINKING_LEVELS = [
+    'off',
+    'minimal',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max',
+];
+export const isThinkingLevel = (value) => THINKING_LEVELS.includes(value);
 /** 每人每小时限额：默认 5，可配 1–1000 */
 export const TELEGRAM_RATE_LIMIT_DEFAULT = 5;
 export const TELEGRAM_RATE_LIMIT_MAX = 1000;

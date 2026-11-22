@@ -6,7 +6,8 @@ import {
   createTelegramApi,
   type TelegramApi,
 } from './telegramApi.js';
-import type { FynvraPluginApi, Unsubscribe } from './types/appPluginApi.js';
+import { isThinkingLevel } from './model.js';
+import type { ChannelModel, FynvraPluginApi, Unsubscribe } from './types/appPluginApi.js';
 import { buildSettingsUi, handleUiAction, type ModelChoices } from './ui.js';
 import { asRecord, errorMessage } from './util.js';
 
@@ -33,6 +34,8 @@ export async function startPlugin(
   let renderTimer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
   let lastWorkspaces = '';
+  /** 最近一次读到的模型列表：改模型 / 档位时按它校验档位 */
+  let lastModels: ChannelModel[] | null = null;
 
   /** 读可选的模型；旧版 Fynvra 没有 channel.models（或拒绝调用）时不支持 */
   const loadModels = async (): Promise<ModelChoices> => {
@@ -49,7 +52,12 @@ export async function startPlugin(
                 modelId: m.modelId as string,
                 providerName: str(m.providerName) ? (m.providerName as string) : (m.providerId as string),
                 label: str(m.label) ? (m.label as string) : (m.modelId as string),
-              },
+                // 旧版 Fynvra 不带 thinkingLevels：当作空，不显示档位、也不传 thinking
+                thinkingLevels: Array.isArray(m.thinkingLevels)
+                  ? m.thinkingLevels.filter(isThinkingLevel)
+                  : [],
+                ...(isThinkingLevel(m.defaultThinking) ? { defaultThinking: m.defaultThinking } : {}),
+              } satisfies ChannelModel,
             ]
           : [];
       });
@@ -66,6 +74,7 @@ export async function startPlugin(
     try {
       const [workspaces, models] = await Promise.all([api.workspaces.list(), loadModels()]);
       lastWorkspaces = JSON.stringify(workspaces);
+      lastModels = models.supported ? models.models : null;
       await api.ui.render(buildSettingsUi(service.getState(), workspaces, models));
     } catch (error) {
       api.log('warn', `设置页渲染失败：${errorMessage(error)}`);
@@ -82,7 +91,7 @@ export async function startPlugin(
   const offs: Unsubscribe[] = [
     service.onChange(scheduleRender),
     api.handle('ui.action', async (args) => {
-      const result = await handleUiAction(service, args);
+      const result = await handleUiAction(service, args, lastModels);
       // 失败时也重画：例如数字框的非法值要恢复成已保存的值
       scheduleRender();
       return result;

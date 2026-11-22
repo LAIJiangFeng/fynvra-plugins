@@ -5,7 +5,7 @@
 import { isTelegramRateLimit, maskTelegramToken, } from './model.js';
 import { addMessageAttachments, cleanupStaleAttachments, downloadAttachments, mergeAttachments, rejectionSummary, removeFiles, } from './attachments.js';
 import { dutyPrompt, MAX_FOLLOW_UPS, parseAssessment, parseBotMention, parseBugCommand, parseTriageInput, pullRequestSection, TEMPLATES, triagePrompt, } from './content.js';
-import { createTelegramStore, emptyTelegramData, MAX_CANDIDATES, MAX_CARDS, parseTelegramData, PROJECT_NOTE_MAX, TOKEN_SECRET_KEY, } from './store.js';
+import { createTelegramStore, emptyTelegramData, MAX_CANDIDATES, MAX_CARDS, parseModelRef, parseTelegramData, PROJECT_NOTE_MAX, TOKEN_SECRET_KEY, } from './store.js';
 import { redactToken, TELEGRAM_TOKEN_PATTERN, TelegramApiError, } from './telegramApi.js';
 import { asRecord, errorMessage } from './util.js';
 export const DEBOUNCE_MS = 3_000;
@@ -354,7 +354,7 @@ export function createTelegramService(deps) {
                 ({ sessionId } = await api.channel.createSession({ ...base, model }));
             }
             catch (error) {
-                warn(`所选模型不可用（${model.providerId} / ${model.modelId}），改用默认模型建会话：${errorMessage(error)}`);
+                warn(`所选模型不可用（${model.providerId} / ${model.modelId}${model.thinking ? ` · ${model.thinking}` : ''}），改用默认模型和档位建会话：${errorMessage(error)}`);
                 ({ sessionId } = await api.channel.createSession(base));
                 modelFallback = true;
                 emit();
@@ -1724,8 +1724,10 @@ export function createTelegramService(deps) {
         },
         async setModel(kind, model) {
             const key = kind === 'triage' ? 'triageModel' : 'dutyModel';
-            if (model)
-                data[key] = { providerId: model.providerId, modelId: model.modelId };
+            // 带上合法的思考档位，其余字段丢弃
+            const ref = model ? parseModelRef(model) : undefined;
+            if (ref)
+                data[key] = ref;
             else
                 delete data[key];
             modelFallback = false;

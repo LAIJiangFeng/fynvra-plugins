@@ -1,6 +1,7 @@
 // 插件入口（清单 host.main → dist/index.js）：activate 组装 Telegram 客户端、服务与设置页，deactivate 停止。
 import { createTelegramService } from './service.js';
 import { createHttpsGet, createHttpsPost, createTelegramApi, } from './telegramApi.js';
+import { isThinkingLevel } from './model.js';
 import { buildSettingsUi, handleUiAction } from './ui.js';
 import { asRecord, errorMessage } from './util.js';
 /** 状态变化后合并多久再重新 render */
@@ -14,6 +15,8 @@ export async function startPlugin(api, telegram, options = {}) {
     let renderTimer;
     let stopped = false;
     let lastWorkspaces = '';
+    /** 最近一次读到的模型列表：改模型 / 档位时按它校验档位 */
+    let lastModels = null;
     /** 读可选的模型；旧版 Fynvra 没有 channel.models（或拒绝调用）时不支持 */
     const loadModels = async () => {
         if (typeof api.channel.models !== 'function')
@@ -30,6 +33,11 @@ export async function startPlugin(api, telegram, options = {}) {
                             modelId: m.modelId,
                             providerName: str(m.providerName) ? m.providerName : m.providerId,
                             label: str(m.label) ? m.label : m.modelId,
+                            // 旧版 Fynvra 不带 thinkingLevels：当作空，不显示档位、也不传 thinking
+                            thinkingLevels: Array.isArray(m.thinkingLevels)
+                                ? m.thinkingLevels.filter(isThinkingLevel)
+                                : [],
+                            ...(isThinkingLevel(m.defaultThinking) ? { defaultThinking: m.defaultThinking } : {}),
                         },
                     ]
                     : [];
@@ -48,6 +56,7 @@ export async function startPlugin(api, telegram, options = {}) {
         try {
             const [workspaces, models] = await Promise.all([api.workspaces.list(), loadModels()]);
             lastWorkspaces = JSON.stringify(workspaces);
+            lastModels = models.supported ? models.models : null;
             await api.ui.render(buildSettingsUi(service.getState(), workspaces, models));
         }
         catch (error) {
@@ -65,7 +74,7 @@ export async function startPlugin(api, telegram, options = {}) {
     const offs = [
         service.onChange(scheduleRender),
         api.handle('ui.action', async (args) => {
-            const result = await handleUiAction(service, args);
+            const result = await handleUiAction(service, args, lastModels);
             // 失败时也重画：例如数字框的非法值要恢复成已保存的值
             scheduleRender();
             return result;

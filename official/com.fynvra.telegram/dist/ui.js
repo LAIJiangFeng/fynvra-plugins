@@ -1,4 +1,5 @@
 import { TELEGRAM_RATE_LIMIT_MAX } from './model.js';
+import { isThinkingLevel } from './model.js';
 import { httpsUrl, isUiId } from './types/appPluginUi.js';
 import { asRecord } from './util.js';
 /** 最近记录最多显示几条（列表上限 200，整页 ≤ 256 KB） */
@@ -15,16 +16,18 @@ export const ACTIONS = {
     saveRateLimit: 'rateLimit.save',
     triageModel: 'model.triage',
     dutyModel: 'model.duty',
+    triageThinking: 'thinking.triage',
+    dutyThinking: 'thinking.duty',
     approve: 'card.approve',
     reject: 'card.reject',
 };
 const CONNECTION_TEXT = {
-    'no-token': '未配置：还没有 token',
+    'no-token': '未配置',
     connecting: '连接中…',
     connected: '已连接',
     'network-error': '网络错误，正在重试',
     unauthorized: 'token 无效，请重新填写',
-    conflict: '另有实例在轮询：同一个 token 另有程序在轮询，请关掉另一处',
+    conflict: '另有实例在轮询，请关掉另一处',
     'api-error': 'Telegram 接口出错，正在重试',
 };
 const STATUS_TEXT = {
@@ -46,19 +49,28 @@ const KIND_TEXT = {
     question: '提问/闲聊',
     invalid: '无效',
 };
-/** 隐私模式开启（或还不知道）时的说明 */
-const PRIVACY_ON = '3. 机器人现在开着隐私模式，只能收到 /bug、@它和回复它的消息。「配文里 @」和「回复机器人」在隐私模式下也能用；「先发图再 @」「先 @ 再发图」「只 @ 不写内容」需要机器人能看到群里的普通消息，请二选一：在 @BotFather 里 /setprivacy → 选择机器人 → Disable，然后把机器人移出群再重新拉进来（修改才对已有的群生效）；或者把机器人设为群管理员。';
-const PRIVACY_OFF = '3. 隐私模式已关闭：机器人能看到群里所有消息，但插件只在内存里暂存每个人最近 60 秒的消息，用来拼接他自己的 @ 或回复；不保存、不下载、不交给 AI，过期即丢。';
-const guide = (privacyOff) => [
-    '1. 在 Telegram 找 @BotFather，发送 /newbot 取得 token，填到上面的 Bot Token，再把机器人拉进群。',
-    '2. 群成员在群里 @机器人 就算反馈：可以提问、闲聊或反馈问题，也可以直接回复机器人的消息，或者用 /bug 命令。图片和文档可以在配文里 @机器人，也可以先发图再 @（60 秒内）或先 @ 再发图；只 @ 不写内容时，取这个人前一条或后一条消息当内容。支持图片和文档（与 Fynvra 输入框相同的格式和上限），视频、语音、贴纸等不处理，机器人会在回复里说明。',
-    privacyOff ? PRIVACY_OFF : PRIVACY_ON,
-    '4. 群第一次 @机器人 后会出现在「候选群」，选好 git 工作区再点「允许」。一个群可以在「已允许的群」里添加多个项目：群消息先交给主项目分诊，属于其他项目的由 AI 自动转交（每条最多转一次，需要支持该功能的 Fynvra）。',
-    '5. bug 定位到原因才会修复并开 PR；新功能要你在「待确认需求」里采纳。本机需要先运行 gh auth login 才能开 PR。',
-    '6. 网络默认跟随 Fynvra 的代理设置；连不上时检查 VPN，或在「设置 → 通用 → 网络代理」改用手动代理。',
-    '7. Fynvra 关着的时候不会处理群消息。',
-].join('\n');
-const NETWORK_HINT = '连不上 api.telegram.org：请确认 VPN 或代理已开启；网络代理默认跟随系统代理，也可以在「设置 → 通用 → 网络代理」改用手动代理';
+const PRIVACY_WARNING = '隐私模式开着：机器人只收到 @ 它的消息。到 @BotFather 关闭后，把机器人移出群再拉回来';
+const NETWORK_HINT = '连不上 Telegram：检查 VPN 或「设置 → 通用 → 网络代理」';
+/** 思考档位的显示文字，和 Fynvra 输入框一致 */
+const THINKING_TEXT = {
+    off: 'off · 关闭',
+    minimal: 'minimal',
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    xhigh: 'xhigh',
+    max: 'max',
+};
+/** 「x 分钟前出现」 */
+function seenAgo(seenAt, now) {
+    const minutes = Math.max(0, Math.floor((now - seenAt) / 60_000));
+    if (minutes < 1)
+        return '刚刚出现';
+    if (minutes < 60)
+        return `${minutes} 分钟前出现`;
+    const hours = Math.floor(minutes / 60);
+    return hours < 24 ? `${hours} 小时前出现` : `${Math.floor(hours / 24)} 天前出现`;
+}
 const clip = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 /** 下拉里「默认」的值；模型的值都含 `/`，不会混淆 */
 export const DEFAULT_MODEL_VALUE = 'default';
@@ -88,9 +100,13 @@ export function parseModelValue(value) {
     }
 }
 const sameModel = (a, b) => a.providerId === b.providerId && a.modelId === b.modelId;
+/** 模型支持的档位；列表里找不到或旧版 Fynvra 时为空 */
+export function thinkingLevelsOf(models, ref) {
+    return models?.find((model) => sameModel(model, ref))?.thinkingLevels ?? [];
+}
 function modelNodes(state, choices) {
     if (!choices.supported) {
-        return [{ type: 'text', text: '当前 Fynvra 版本不支持选择模型', tone: 'muted' }];
+        return [{ type: 'text', text: '当前 Fynvra 不支持选模型', tone: 'muted' }];
     }
     const listed = (choices.models ?? [])
         // shortcut: 编码后超过 200 字符的模型不列出（id 极长才会碰到），有人遇到再改按序号编码
@@ -99,16 +115,17 @@ function modelNodes(state, choices) {
         .map((model) => ({
         value: modelValue(model),
         label: clip(`${model.providerName} / ${model.label}`, 200),
-        ref: model,
+        model,
     }));
     const nodes = [];
     let unavailable = false;
-    const select = (id, label, action, hint, chosen) => {
+    const select = (kind, label, hint, chosen) => {
         const options = [
             { value: DEFAULT_MODEL_VALUE, label: '默认（跟随 Fynvra）' },
             ...listed.map(({ value, label }) => ({ value, label })),
         ];
-        if (chosen && !listed.some((option) => sameModel(option.ref, chosen))) {
+        const found = chosen && listed.find((option) => sameModel(option.model, chosen))?.model;
+        if (chosen && !found) {
             // 已选的不在列表里：保留这一项；读到了列表才标「不可用」
             const missing = choices.models !== null;
             if (missing)
@@ -120,21 +137,44 @@ function modelNodes(state, choices) {
         }
         nodes.push({
             type: 'field',
-            id,
+            id: `${kind}Model`,
             label,
             kind: 'select',
             value: chosen ? modelValue(chosen) : DEFAULT_MODEL_VALUE,
             options,
-            action,
+            action: kind === 'triage' ? ACTIONS.triageModel : ACTIONS.dutyModel,
         }, { type: 'text', text: hint, tone: 'muted' });
+        // 选了默认、模型不在列表里或不支持思考时不显示档位
+        if (!found || found.thinkingLevels.length === 0)
+            return;
+        const levels = found.thinkingLevels;
+        const thinkingOptions = [
+            { value: DEFAULT_MODEL_VALUE, label: '默认' },
+            ...levels.map((level) => ({
+                value: level,
+                label: `${THINKING_TEXT[level]}${level === found.defaultThinking ? '（默认）' : ''}`,
+            })),
+        ];
+        if (chosen.thinking && !levels.includes(chosen.thinking)) {
+            thinkingOptions.push({ value: chosen.thinking, label: `${THINKING_TEXT[chosen.thinking]}（不可用）` });
+        }
+        nodes.push({
+            type: 'field',
+            id: `${kind}Thinking`,
+            label: kind === 'triage' ? '分诊思考档位' : '值班思考档位',
+            kind: 'select',
+            value: chosen.thinking ?? DEFAULT_MODEL_VALUE,
+            options: thinkingOptions,
+            action: kind === 'triage' ? ACTIONS.triageThinking : ACTIONS.dutyThinking,
+        });
     };
-    select('triageModel', '分诊模型', ACTIONS.triageModel, '读群消息、追问、回复，建议用便宜快速的模型', state.triageModel);
-    select('dutyModel', '值班模型', ACTIONS.dutyModel, '修复 bug 并开 PR（包括值班派出的修复任务），建议用强模型', state.dutyModel);
+    select('triage', '分诊模型', '读群消息、追问、回复，建议用快的模型', state.triageModel);
+    select('duty', '值班模型', '修 bug、开 PR，建议用强的模型', state.dutyModel);
     if (choices.models === null) {
         nodes.push({ type: 'text', text: '暂时读不到模型列表', tone: 'warning' });
     }
     if (unavailable) {
-        nodes.push({ type: 'text', text: '所选模型不可用，新会话会改用默认模型', tone: 'warning' });
+        nodes.push({ type: 'text', text: '所选模型不可用，新会话用默认', tone: 'warning' });
     }
     if (state.modelFallback) {
         nodes.push({ type: 'text', text: '所选模型不可用，已改用默认', tone: 'warning' });
@@ -142,7 +182,7 @@ function modelNodes(state, choices) {
     return nodes;
 }
 /** 生成整份设置页 */
-export function buildSettingsUi(state, workspaces, models) {
+export function buildSettingsUi(state, workspaces, models, now = Date.now()) {
     const workspaceName = (id) => workspaces.find((workspace) => workspace.id === id)?.name ?? '工作区已移除';
     const gitOptions = workspaces
         .filter((workspace) => workspace.git)
@@ -159,24 +199,28 @@ export function buildSettingsUi(state, workspaces, models) {
             ],
         },
     ];
+    if (state.bot?.canReadAll === false) {
+        connection.push({ type: 'text', text: PRIVACY_WARNING, tone: 'warning' });
+    }
     if (state.connection === 'network-error') {
         connection.push({ type: 'text', text: NETWORK_HINT, tone: 'error' });
     }
-    else if (state.connection === 'unauthorized' || state.connection === 'conflict') {
-        connection.push({ type: 'text', text: CONNECTION_TEXT[state.connection], tone: 'error' });
-    }
+    // 没有 action：输入只是草稿，点「保存」时随按钮一起发出
     connection.push({
         type: 'field',
         id: 'token',
         label: 'Bot Token',
         kind: 'password',
         placeholder: '粘贴 @BotFather 给的 token',
-        action: ACTIONS.saveToken,
-    });
+    }, {
+        type: 'text',
+        text: state.tokenMasked ? `已设置：${state.tokenMasked}` : '还没设置',
+        tone: 'muted',
+    }, { type: 'button', label: '保存', action: ACTIONS.saveToken });
     if (state.tokenMasked) {
-        connection.push({ type: 'text', text: `已设置：${state.tokenMasked}`, tone: 'muted' }, {
+        connection.push({
             type: 'button',
-            label: '清除 token',
+            label: '清除',
             action: ACTIONS.clearToken,
             tone: 'destructive',
             confirm: '清除后机器人停止轮询，群里的反馈不再处理。确定清除 token？',
@@ -186,13 +230,14 @@ export function buildSettingsUi(state, workspaces, models) {
         key: String(candidate.chatId),
         title: clip(candidate.title || '（无群名）', 200),
         ...(gitOptions.length === 0
-            ? { subtitle: '没有可用的 git 工作区：先在 Fynvra 里打开一个有远端的 git 仓库' }
+            ? { subtitle: `${seenAgo(candidate.seenAt, now)} · 没有可选的 git 工作区` }
             : {
+                subtitle: seenAgo(candidate.seenAt, now),
                 controls: [
                     {
                         type: 'field',
                         id: 'workspace',
-                        label: '工作区',
+                        label: '项目',
                         kind: 'select',
                         options: gitOptions,
                     },
@@ -200,29 +245,15 @@ export function buildSettingsUi(state, workspaces, models) {
                 ],
             }),
     }));
-    // 每个群一个子区：群本身（添加项目、移除群）+ 项目列表（说明、设为主项目、移除）
+    // 每个群一个 list：群本身、各项目、添加项目
     const groups = state.groups.map((group) => {
         const unbound = gitOptions.filter((option) => !group.projects.some((p) => p.workspaceId === option.value));
         const groupItem = {
             key: String(group.chatId),
             title: clip(group.title || '（无群名）', 200),
-            subtitle: `绑定 ${group.projects.length} 个项目；群消息先交给主项目分诊，属于其他项目的由 AI 自动转交`,
-            badges: [
-                group.active ? { text: '在群里', tone: 'success' } : { text: '已被移出群', tone: 'error' },
-            ],
+            badges: [group.active ? { text: '在群里', tone: 'success' } : { text: '已移出', tone: 'error' }],
+            subtitle: `${group.projects.length} 个项目`,
             controls: [
-                ...(unbound.length > 0
-                    ? [
-                        {
-                            type: 'field',
-                            id: 'workspace',
-                            label: '添加项目',
-                            kind: 'select',
-                            options: unbound,
-                        },
-                        { type: 'button', label: '添加项目', action: ACTIONS.addProject },
-                    ]
-                    : []),
                 {
                     type: 'button',
                     label: '移除群',
@@ -243,7 +274,7 @@ export function buildSettingsUi(state, workspaces, models) {
                     label: '说明',
                     kind: 'text',
                     value: project.note,
-                    placeholder: '这个项目管什么（给 AI 判断转交用，可不填，最多 200 字）',
+                    placeholder: '一句话说明，帮 AI 判断转交',
                     action: ACTIONS.saveNote,
                 },
                 ...(index > 0
@@ -262,23 +293,34 @@ export function buildSettingsUi(state, workspaces, models) {
                     : []),
             ],
         }));
-        return {
-            type: 'section',
-            title: clip(group.title || '（无群名）', 200),
-            children: [
-                { type: 'list', items: [groupItem] },
-                { type: 'list', items: projects },
-            ],
-        };
+        const addItem = unbound.length > 0
+            ? [
+                {
+                    key: addProjectKey(group.chatId),
+                    title: '添加项目',
+                    controls: [
+                        {
+                            type: 'field',
+                            id: 'workspace',
+                            label: '项目',
+                            kind: 'select',
+                            options: unbound,
+                        },
+                        { type: 'button', label: '添加', action: ACTIONS.addProject },
+                    ],
+                },
+            ]
+            : [];
+        return { type: 'list', items: [groupItem, ...projects, ...addItem] };
     });
     const pending = state.cards
         .filter((card) => card.status === 'pending-approval')
         .map((card) => ({
         key: String(card.id),
         title: clip(card.title || `卡片 #${card.id}`, 200),
-        subtitle: clip(`来自 ${card.groupTitle || '未知群'}`, 500),
+        subtitle: clip(card.groupTitle || '未知群', 500),
         ...(card.assessmentIncomplete
-            ? { badges: [{ text: '三问评估格式不完整，请自行判断', tone: 'warning' }] }
+            ? { badges: [{ text: '评估不完整', tone: 'warning' }] }
             : {}),
         ...(card.assessment ? { body: clip(card.assessment, 4000) } : {}),
         controls: [
@@ -304,20 +346,23 @@ export function buildSettingsUi(state, workspaces, models) {
             { type: 'section', title: '连接', children: connection },
             {
                 type: 'section',
-                title: '候选群',
+                title: '群',
                 children: [
                     {
-                        type: 'list',
-                        empty: '暂无候选群：把机器人拉进群后，在群里 @机器人 发一条消息，群就会出现在这里',
-                        items: candidates,
+                        type: 'section',
+                        title: '候选群',
+                        children: [
+                            { type: 'list', empty: '把机器人拉进群并 @ 它，群会出现在这里', items: candidates },
+                        ],
+                    },
+                    {
+                        type: 'section',
+                        title: '已允许的群',
+                        children: groups.length > 0 ? groups : [{ type: 'list', empty: '还没有允许的群', items: [] }],
                     },
                 ],
             },
-            {
-                type: 'section',
-                title: '已允许的群',
-                children: groups.length > 0 ? groups : [{ type: 'text', text: '还没有允许的群', tone: 'muted' }],
-            },
+            { type: 'section', title: '模型', children: modelNodes(state, models) },
             {
                 type: 'section',
                 title: '限流',
@@ -332,14 +377,9 @@ export function buildSettingsUi(state, workspaces, models) {
                         max: TELEGRAM_RATE_LIMIT_MAX,
                         action: ACTIONS.saveRateLimit,
                     },
-                    {
-                        type: 'text',
-                        text: '超出后会提示一次「你发得有点快」，不再调用模型（1–1000，默认 5）',
-                        tone: 'muted',
-                    },
+                    { type: 'text', text: '超出后提示一次，1–1000', tone: 'muted' },
                 ],
             },
-            { type: 'section', title: '模型', children: modelNodes(state, models) },
             {
                 type: 'section',
                 title: '待确认需求',
@@ -347,13 +387,14 @@ export function buildSettingsUi(state, workspaces, models) {
             },
             {
                 type: 'section',
-                title: '最近记录',
+                title: '反馈记录',
                 children: [{ type: 'list', empty: '还没有记录', items: recent }],
             },
-            { type: 'section', title: '使用说明', children: [{ type: 'text', text: guide(state.bot?.canReadAll === true) }] },
         ],
     };
 }
+/** 「添加项目」行的 key：`add:<群 id>`，不会和群行、项目行混淆 */
+const addProjectKey = (chatId) => `add:${chatId}`;
 /**
  * 项目行的 key：`<群 id>:<工作区 id>`；超出 UI key 的格式（例如太长）时改用 `<群 id>:.<序号>`
  * （工作区 id 不含 `.`，不会混淆）。
@@ -387,7 +428,9 @@ function intKey(itemKey) {
     return Number.isSafeInteger(value) ? value : null;
 }
 /** 处理宿主送来的 ui.action（入参未收窄）；未知操作返回错误 */
-export async function handleUiAction(service, raw) {
+export async function handleUiAction(service, raw, 
+/** 最近一次读到的模型列表，用来校验思考档位 */
+models = null) {
     const record = asRecord(raw);
     const action = record?.action;
     const values = asRecord(record?.values) ?? {};
@@ -416,7 +459,7 @@ export async function handleUiAction(service, raw) {
             return chatId === null ? { ok: false, error: '群不存在' } : service.removeGroup(chatId);
         }
         case ACTIONS.addProject: {
-            const chatId = intKey(itemKey);
+            const chatId = intKey(typeof itemKey === 'string' ? itemKey.replace(/^add:/, '') : itemKey);
             const workspaceId = values.workspace;
             if (chatId === null)
                 return { ok: false, error: '群不存在' };
@@ -450,7 +493,28 @@ export async function handleUiAction(service, raw) {
             const model = parseModelValue(values[triage ? 'triageModel' : 'dutyModel']);
             if (model === undefined)
                 return { ok: false, error: '模型格式不对' };
-            return service.setModel(triage ? 'triage' : 'duty', model);
+            if (!model)
+                return service.setModel(triage ? 'triage' : 'duty', null);
+            // 新模型支持原来的档位就保留，否则回到默认
+            const thinking = service.getState()[triage ? 'triageModel' : 'dutyModel']?.thinking;
+            const keep = thinking !== undefined && thinkingLevelsOf(models, model).includes(thinking);
+            return service.setModel(triage ? 'triage' : 'duty', keep ? { ...model, thinking } : model);
+        }
+        case ACTIONS.triageThinking:
+        case ACTIONS.dutyThinking: {
+            const triage = action === ACTIONS.triageThinking;
+            const current = service.getState()[triage ? 'triageModel' : 'dutyModel'];
+            if (!current)
+                return { ok: false, error: '请先选模型' };
+            const value = values[triage ? 'triageThinking' : 'dutyThinking'];
+            const { providerId, modelId } = current;
+            if (value === DEFAULT_MODEL_VALUE) {
+                return service.setModel(triage ? 'triage' : 'duty', { providerId, modelId });
+            }
+            if (!isThinkingLevel(value) || !thinkingLevelsOf(models, current).includes(value)) {
+                return { ok: false, error: '这个模型不支持该档位' };
+            }
+            return service.setModel(triage ? 'triage' : 'duty', { providerId, modelId, thinking: value });
         }
         case ACTIONS.approve:
         case ACTIONS.reject: {
