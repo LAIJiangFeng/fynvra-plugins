@@ -11,28 +11,10 @@
   "tier": "official",
   "versions": [
     {
-      "version": "0.1.0",
-      "commit": "6a11fe5cc3c12ae7886c1a3d187d57d581c918fd",
-      "path": "official/com.fynvra.telegram",
-      "changelog": "首个版本：由 Fynvra 内置的 Telegram 群反馈值班迁移而来，首次启动导入旧数据。"
-    },
-    {
-      "version": "0.1.1",
-      "commit": "428395fa81beb78202f8e5d0b531aeb56505d48b",
-      "path": "official/com.fynvra.telegram",
-      "changelog": "修复：带图片或文件的消息被忽略；配文里 @机器人 也算反馈"
-    },
-    {
-      "version": "0.1.2",
-      "commit": "73dc703f6c3656b4f45ac4a756f94889b048f169",
-      "path": "official/com.fynvra.telegram",
-      "changelog": "支持图片和文档附件（与 Fynvra 输入框相同的格式和上限）；未处理的附件在回复里说明"
-    },
-    {
       "version": "0.1.3",
-      "commit": "f3f0b26e020a8ef5f1c56c696f06b02445cf35cb",
+      "commit": "cbbe8efd0b3d4db5f9d251f02a8804aa837eee5a",
       "path": "official/com.fynvra.telegram",
-      "changelog": "图片和 @ 分开发也能识别：先发图再 @、先 @ 再发图、只 @ 不写内容时取前后消息；设置页显示隐私模式并给出说明"
+      "changelog": "首个公开版本：群里 @机器人 反馈问题，自动分诊与追问；支持图片和文档（先发图再 @、先 @ 再发图也能识别）；定位到原因的 bug 由值班会话修复并开 PR，新功能需在设置页采纳；群回复先经过出站过滤。"
     }
   ]
 }
