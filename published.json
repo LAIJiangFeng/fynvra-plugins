@@ -3,5 +3,10 @@
     "commit": "cbbe8efd0b3d4db5f9d251f02a8804aa837eee5a",
     "sha256": "2c7cb2e75875192e575c01a86edacc5fbc44552aa3b8aa198756966c944dd21e",
     "size": 100328
+  },
+  "com.fynvra.telegram@0.1.4": {
+    "commit": "8c874348b26cf56adf003290856543ad911cbc3f",
+    "sha256": "75fee85da3aa34b3026692b27def455773f25e09f464a739f8c649edc54f766d",
+    "size": 109824
   }
 }
