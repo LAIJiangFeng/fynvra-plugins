@@ -1,5 +1,6 @@
 // 飞书消息内容解析（纯函数），格式以飞书「接收消息内容」文档为准：
-// text 取 text 并按 mentions 处理 @；post 按段取文字、@、链接、图片；image / file 当附件；其余类型列为未处理。
+// text 取 text 并按 mentions 处理 @；post 按段取文字、@、链接、图片；image / file 当附件；
+// merge_forward 只标记（子消息要另外调接口读）；其余类型列为未处理。
 import { addRef, displayName, type ItemAttachments } from './attachments.js';
 import type { FeishuMention, FeishuMessageEvent } from './feishuApi.js';
 import { isFeishuId } from './feishuApi.js';
@@ -13,13 +14,14 @@ export interface ParsedMessage {
   files: ItemAttachments;
   /** 带了附件（含不支持的类型；表情包不算，同 Telegram 的贴纸） */
   hasFiles: boolean;
+  /** 合并转发消息：聊天记录要用「获取指定消息的内容」另读 */
+  forward?: boolean;
 }
 
 /** 不支持的消息类型的显示名 */
 const UNSUPPORTED: Record<string, string> = {
   audio: '语音',
   media: '视频',
-  merge_forward: '合并转发',
   interactive: '卡片消息',
   share_chat: '群名片',
   share_user: '个人名片',
@@ -75,7 +77,10 @@ function postBody(raw: Record<string, unknown> | null): Record<string, unknown> 
 }
 
 /** 解析一条消息；系统消息等不处理的返回 null */
-export function parseMessage(event: FeishuMessageEvent, botOpenId: string): ParsedMessage | null {
+export function parseMessage(
+  event: Pick<FeishuMessageEvent, 'messageId' | 'msgType' | 'content' | 'mentions'>,
+  botOpenId: string
+): ParsedMessage | null {
   const files: ItemAttachments = { refs: [], rejected: [] };
   const mentioned = event.mentions.some((m) => m.openId === botOpenId);
   const content = parseJson(event.content);
@@ -160,6 +165,8 @@ export function parseMessage(event: FeishuMessageEvent, botOpenId: string): Pars
       // 表情包不支持，也不算反馈（例如回复机器人一个表情）
       files.rejected.push({ name: '表情包', reason: 'unsupported' });
       break;
+    case 'merge_forward':
+      return { text: '', mentioned, files, hasFiles: false, forward: true };
     case 'system':
       return null;
     default:

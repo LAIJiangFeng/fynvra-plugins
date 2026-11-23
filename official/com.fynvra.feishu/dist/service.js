@@ -2,12 +2,12 @@
 // 长连接收事件、会话发现与准入、分诊投递、triage_report 处理、追问、值班投递、卡片与任务关联、PR 结果通知。
 // 会话里只会收到经 api.channel.filterOutbound 过滤后的 triage 回复与固定模板。
 // shortcut: 引擎复制自 Telegram 插件，两边分别维护；出现第三个渠道或两边修复开始分叉时再抽公共模块
-import { createHash } from 'node:crypto';
 import { chatFallbackTitle, isRateLimit, maskSecret, } from './model.js';
 import { cleanupStaleAttachments, downloadAttachments, mergeAttachments, rejectionSummary, removeFiles, } from './attachments.js';
 import { dutyPrompt, MAX_FOLLOW_UPS, parseAssessment, parseTriageInput, pullRequestSection, pullRequestSource, TEMPLATES, triagePrompt, } from './content.js';
 import { APP_ID_PATTERN, APP_SECRET_PATTERN, FeishuApiError, redactSecrets, } from './feishuApi.js';
 import { parseMessage } from './message.js';
+import { fitBytes, forwardRecord, joinBody, MAX_GATHER_MS, memberLabel, READ_TIMEOUT_MS, readFailure, renderBody, } from './reading.js';
 import { createFeishuStore, emptyFeishuData, MAX_BOT_MESSAGES, MAX_CANDIDATES, MAX_CARDS, parseModelRef, PROJECT_NOTE_MAX, SECRET_KEY, } from './store.js';
 import { asRecord, errorMessage } from './util.js';
 export const DEBOUNCE_MS = 3_000;
@@ -19,12 +19,8 @@ const BACKOFF_START_MS = 3_000;
 const BACKOFF_MAX_MS = 60_000;
 const HOUR_MS = 60 * 60_000;
 const ITEM_TEXT_MAX = 4_000;
-/** 被识别为反馈但只有附件、没有文字时的正文 */
-const ATTACHMENT_ONLY_TEXT = '（只发了附件，没有文字）';
 /** 宿主 channel.createSession 的标题上限 */
 const SESSION_TITLE_MAX = 200;
-/** 只 @ 了机器人、前后都没有内容时的正文 */
-const EMPTY_MENTION_TEXT = '（只 @ 了机器人，没有写内容）';
 /** 反馈投递后又发了附件（R5）时的正文开头 */
 const SUPPLEMENT_TEXT = '（补充了附件）';
 /** 普通消息缓冲窗口：只在内存里，用来拼接同一人的 @ 或回复 */
@@ -54,10 +50,23 @@ const CHANNEL_STATUSES = [
     'missing',
 ];
 const isBusy = (status) => status === 'running' || status === 'waiting-approval';
-/** 发送者的匿名短标签：只用 open_id 的哈希，不取姓名 */
-export function memberLabel(openId) {
-    return `成员 ${createHash('sha256').update(openId).digest('hex').slice(0, 4)}`;
-}
+export { memberLabel };
+/** 卡片原始内容：限 4000 字，引用和话题段优先保留（追问时要看到） */
+const cardContent = (body) => {
+    const tail = body.tail ? `\n\n${body.tail}` : '';
+    return `${body.head.slice(0, Math.max(0, ITEM_TEXT_MAX - tail.length))}${tail}`.slice(0, ITEM_TEXT_MAX);
+};
+/** 最多等 ms，超时按读取失败处理 */
+const withTimeout = (promise, ms) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new FeishuApiError('network', 'timeout')), ms);
+    promise.then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+    }, (error) => {
+        clearTimeout(timer);
+        reject(error);
+    });
+});
 const sessionTitle = (title) => title.slice(0, SESSION_TITLE_MAX);
 /** 连接失败时给人看的说明（不带密钥） */
 const CONNECTION_ERROR_TEXT = {
@@ -196,6 +205,17 @@ export function createFeishuService(deps) {
     const hasFiles = (item) => item.files.refs.length + item.files.rejected.length > 0;
     /** 投递前等多久：已带附件的 3 秒，只有文字的多等一会儿图（R4） */
     const readyDelay = (item) => (hasFiles(item) ? debounceMs : attachWaitMs);
+    /** 重新计算投递时间：从条目创建算起最多等 MAX_GATHER_MS（Q3） */
+    const scheduleReady = (item) => {
+        item.readyAt = Math.min(now() + readyDelay(item), item.createdAt + MAX_GATHER_MS);
+    };
+    /** 把一条消息的内容记进条目 */
+    const addPart = (item, part) => {
+        item.parts.push(part);
+        mergeAttachments(item.files, part.files);
+        if (!item.messageIds.includes(part.messageId))
+            item.messageIds.push(part.messageId);
+    };
     // ---------- 状态与落盘 ----------
     const persist = () => {
         const write = store.save(data);
@@ -527,11 +547,9 @@ export function createFeishuService(deps) {
             await refreshCheckout(workspaceId);
             if (!queue.includes(item) || inflight.has(sessionId))
                 return;
-            if (item.awaiting) {
-                // 60 秒没等到后一条：用占位正文投递，让 AI 追问
+            // 60 秒没等到后一条：用占位正文投递（renderBody 里补），让 AI 追问
+            if (item.awaiting)
                 item.awaiting = false;
-                item.texts = [EMPTY_MENTION_TEXT];
-            }
             if (!item.started) {
                 item.started = true;
                 const records = recent.get(chatId) ?? new Map();
@@ -540,6 +558,9 @@ export function createFeishuService(deps) {
             }
             if (!item.downloaded) {
                 const c = creds();
+                // 和下载同一阶段：读引用的消息、话题第一条和合并转发（引用里的附件并入 item.files）
+                if (c && !item.read)
+                    item.read = await readContext(c, item);
                 item.downloaded = c
                     ? await downloadAttachments({
                         dataDir: api.dataDir,
@@ -569,7 +590,8 @@ export function createFeishuService(deps) {
                 : group.projects
                     .filter((p) => p.workspaceId !== workspaceId)
                     .map((p) => ({ name: labels.get(p.workspaceId) ?? p.workspaceId, note: p.note }));
-            const prompt = triagePrompt({
+            const buildPrompt = (text) => triagePrompt({
+                // 正文由 renderBody 拼好（含话题、引用段），放在 <untrusted-content> 里
                 chatTitle: group.title,
                 chatType: group.chatType,
                 ...(otherProjects.length > 0 ? { otherProjects } : {}),
@@ -595,13 +617,18 @@ export function createFeishuService(deps) {
                     : {}),
                 sender: item.sender,
                 messageIds: item.messageIds,
-                text: item.texts.join('\n'),
+                text,
                 attachments: downloaded.attachments.length,
                 rejected: rejectionSummary([...item.files.rejected, ...downloaded.rejected]),
             });
+            // Q4：投给核心的 text 必须小于 64 KiB，超出时依次截短合并转发、引用、@ 之前的消息
+            const { body, text: prompt } = fitBytes((cut) => {
+                const body = renderBody(item.parts, item.read, cut);
+                return { body, text: buildPrompt(joinBody(body)) };
+            });
             // 先登记在途条目：triage_report 可能在 prompt 返回前就到
             await applyPendingModel(sessionId, 'triage');
-            const pending = { ...item, workspaceId, reported: false };
+            const pending = { ...item, workspaceId, reported: false, body };
             inflight.set(sessionId, pending);
             let delivered = false;
             try {
@@ -650,7 +677,7 @@ export function createFeishuService(deps) {
     };
     /** 整轮没有调用 triage_report：电脑上记一笔，群里用固定模板回复原消息 */
     const recordUnreported = (item) => {
-        const text = item.texts.join('\n');
+        const text = item.body.head;
         warn(`分诊会话这一轮没有调用 triage_report（会话 ${item.chatId}）`);
         const group = groupOf(item.chatId);
         if (!group)
@@ -673,7 +700,7 @@ export function createFeishuService(deps) {
             status: 'unreported',
             title: text.replace(/\s+/g, ' ').slice(0, 80),
             summary: '',
-            content: text.slice(0, ITEM_TEXT_MAX),
+            content: cardContent(item.body),
             messageId: item.replyTo,
             botMessageIds: [],
             followUps: 0,
@@ -731,6 +758,78 @@ export function createFeishuService(deps) {
         rate.set(userId, recent);
         return false;
     };
+    /**
+     * 投递前读：本条及并入消息引用的消息（FS1）、话题第一条（FS2）、条目里的合并转发（FS3）。
+     * 每次读最多等 5 秒；读不到只写原因，照常投递。引用里的图片和文件并入 item.files，和本条的一起计上限。
+     */
+    const readContext = async (c, item) => {
+        const botOpenId = data.bot?.openId ?? '';
+        const read = { roots: [], quotes: [], records: {} };
+        const fetch = async (id, what) => {
+            try {
+                const items = await withTimeout(deps.feishu.getMessage(c, id, READ_TIMEOUT_MS), READ_TIMEOUT_MS);
+                const message = items.find((m) => m.messageId === id);
+                if (!message)
+                    throw new FeishuApiError('api', 'messages/get: message not in response');
+                if (message.deleted)
+                    throw new FeishuApiError('api', 'messages/get: deleted', 230110);
+                return { items, message };
+            }
+            catch (error) {
+                warn(`读取${what}失败：${errorMessage(error)}`);
+                return { error: readFailure(error) };
+            }
+        };
+        const author = (m) => m.senderType !== 'app'
+            ? memberLabel(m.senderId || m.messageId)
+            : m.senderId === data.appId || isBotMessage(m.messageId)
+                ? '机器人（你之前发的回复）'
+                : '其他机器人';
+        const own = item.parts.filter((p) => !p.pre);
+        const quoteIds = [...new Set(own.flatMap((p) => (p.parentId ? [p.parentId] : [])))];
+        const rootIds = [
+            ...new Set(own.flatMap((p) => (p.rootId && p.rootId !== p.parentId ? [p.rootId] : []))),
+        ].filter((id) => !quoteIds.includes(id));
+        for (const id of rootIds) {
+            const got = await fetch(id, '话题的第一条消息');
+            if (!('message' in got)) {
+                read.roots.push({ error: got.error });
+                continue;
+            }
+            // 只读文字，不下载附件
+            read.roots.push({ author: author(got.message), text: parseMessage(got.message, botOpenId)?.text ?? '' });
+        }
+        for (const id of quoteIds) {
+            const got = await fetch(id, '引用的消息');
+            if (!('message' in got)) {
+                read.quotes.push({ error: got.error });
+                continue;
+            }
+            const parsed = parseMessage(got.message, botOpenId);
+            const quote = { author: author(got.message), text: parsed?.text ?? '' };
+            if (parsed?.forward) {
+                // 引用的是合并转发：不写原作者，正文是聊天记录
+                quote.author = `${quote.author}（转发的消息）`;
+                quote.text = forwardRecord(got.items, id, botOpenId);
+                quote.record = true;
+            }
+            if (parsed) {
+                mergeAttachments(item.files, {
+                    refs: parsed.files.refs,
+                    rejected: parsed.files.rejected.map((r) => r.reason === 'unsupported' ? { ...r, name: `引用的消息里的${r.name}` } : r),
+                });
+            }
+            read.quotes.push(quote);
+        }
+        for (const part of item.parts.filter((p) => p.forward)) {
+            const got = await fetch(part.messageId, '合并转发的聊天记录');
+            read.records[part.messageId] =
+                'message' in got
+                    ? forwardRecord(got.items, part.messageId, botOpenId)
+                    : `合并转发的聊天记录没能读取（${got.error}）`;
+        }
+        return read;
+    };
     /** 机器人发过的消息（判断「回复机器人」） */
     const isBotMessage = (id) => id !== undefined &&
         (data.botMessageIds.includes(id) || data.cards.some((c) => c.botMessageIds.includes(id)));
@@ -767,15 +866,21 @@ export function createFeishuService(deps) {
         const text = parsed.text;
         const files = parsed.files;
         const attachments = parsed.hasFiles;
+        const forward = parsed.forward === true;
         const time = event.createTime;
         const queue = queues.get(chatId) ?? [];
         pruneContext(chatId, time);
         // 这个人还没开始投递的最新条目（已开始下载或投递的不再并入）
         const open = [...queue].reverse().find((item) => item.fromId === fromId && !item.started);
-        if (!text && !attachments)
+        // 群里的空 @ 也往下走：可能引用了消息，或 @ 前发过内容（Q1 / Q2 / R3）
+        if (!text && !attachments && !forward && !(parsed.mentioned && !p2p))
             return;
         // 引用回复（parent_id）或话题（root_id）指向机器人发过的消息
         const repliedId = [event.parentId, event.rootId].find(isBotMessage);
+        // 引用了某张卡片的原始反馈消息：按新反馈处理，那张卡片只作背景
+        const quotedCard = event.parentId === undefined
+            ? undefined
+            : data.cards.find((c) => c.chatId === chatId && c.messageId === event.parentId);
         let body;
         let target = {};
         if (repliedId !== undefined) {
@@ -788,27 +893,38 @@ export function createFeishuService(deps) {
             // 私聊里每条都算反馈；不用引用回复，直接接上正在追问的卡片
             body = text;
             const asking = [...data.cards].reverse().find((c) => c.chatId === chatId && c.status === 'asking');
-            if (asking)
+            if (quotedCard)
+                target = { contextCardId: quotedCard.id };
+            else if (asking)
                 target = { cardId: asking.id };
         }
         else {
             // 群里只有 @机器人 才算反馈；其余消息丢弃或暂存
             body = parsed.mentioned ? text : null;
+            if (body !== null && quotedCard)
+                target = { contextCardId: quotedCard.id };
         }
         const caption = text;
+        /** 这条消息给条目贡献的内容（引用和话题在投递前读） */
+        const partOf = (content) => ({
+            messageId,
+            text: content.slice(0, ITEM_TEXT_MAX),
+            files,
+            hasFiles: attachments,
+            ...(forward ? { forward: true } : {}),
+            ...(event.parentId ? { parentId: event.parentId } : {}),
+            ...(event.rootId ? { rootId: event.rootId } : {}),
+        });
         /** 把这条消息并入已有条目，重新计算投递时间 */
         const mergeInto = (item, content) => {
-            if (content)
-                item.texts.push(content.slice(0, ITEM_TEXT_MAX));
-            item.messageIds.push(messageId);
-            mergeAttachments(item.files, files);
+            addPart(item, partOf(content));
             item.lastDate = time;
-            item.readyAt = now() + readyDelay(item);
+            scheduleReady(item);
             scheduleChat(chatId, 0);
         };
         /** 并入的后一条：标明来源（插件生成的说明，用户原文接在后面） */
-        const after = (content) => content
-            ? `（以下是该用户在 @ 后发的消息）\n${content}`
+        const after = (content) => content || forward
+            ? `（以下是该用户在 @ 后发的消息）${content ? `\n${content}` : ''}`
             : attachments
                 ? '（该用户在 @ 后发的附件已并入本条）'
                 : '';
@@ -830,19 +946,20 @@ export function createFeishuService(deps) {
             queues.set(chatId, queue);
             scheduleChat(chatId, 0);
         };
-        const newItem = (texts) => ({
+        const newItem = () => ({
             chatId,
             fromId,
             sender: memberLabel(fromId),
-            messageIds: [messageId],
+            messageIds: [],
             replyTo: messageId,
-            texts,
+            parts: [],
             files: { refs: [], rejected: [] },
             lastDate: time,
             readyAt: now(),
+            createdAt: now(),
             outcome: {},
         });
-        // 私聊：同一人还没投递的条目在等（有附件 3 秒、纯文字 8 秒），连续发的都并进去，不另计限流
+        // 私聊：同一人还没投递的条目在等（有附件 3 秒、纯文字 8 秒，总共最多 30 秒），连续发的都并进去，不另计限流
         if (p2p &&
             open &&
             !open.awaiting &&
@@ -854,8 +971,8 @@ export function createFeishuService(deps) {
         // R3：等待中的空 @ 收到同一人的下一条（普通消息或反馈都算），并入后按正常节奏投递；不另计限流
         if (open?.awaiting && now() < open.readyAt) {
             const content = after(body ?? caption);
-            if (!content) {
-                open.messageIds.push(messageId); // 又一个空 @：继续等
+            if (!content && !event.parentId) {
+                addPart(open, partOf('')); // 又一个空 @：继续等
                 return;
             }
             open.awaiting = false;
@@ -864,8 +981,8 @@ export function createFeishuService(deps) {
         }
         if (body === null) {
             // 普通群消息
-            if (open && !open.awaiting && attachments) {
-                // R4：还没投递的条目在等图，附件和配文一起并入
+            if (open && !open.awaiting && (attachments || caption || forward)) {
+                // R4 / Q3：还没投递的条目在等，同一人接着发的文字和附件一起并入
                 mergeInto(open, after(caption));
                 return;
             }
@@ -874,10 +991,10 @@ export function createFeishuService(deps) {
                 // R5：反馈投递后 60 秒内补发的附件，按回复该卡片处理；计入限流
                 if (limited())
                     return;
-                const item = newItem([`${SUPPLEMENT_TEXT}${caption}`.slice(0, ITEM_TEXT_MAX)]);
-                mergeAttachments(item.files, files);
+                const item = newItem();
+                addPart(item, partOf(`${SUPPLEMENT_TEXT}${caption}`));
                 item.supplementOf = source.outcome;
-                item.readyAt = now() + readyDelay(item);
+                scheduleReady(item);
                 enqueue(item);
                 return;
             }
@@ -888,6 +1005,7 @@ export function createFeishuService(deps) {
                 text: caption.slice(0, ITEM_TEXT_MAX),
                 files,
                 hasFiles: attachments,
+                ...(forward ? { forward: true } : {}),
             });
             return;
         }
@@ -899,41 +1017,74 @@ export function createFeishuService(deps) {
             open.contextCardId === target.contextCardId &&
             time - open.lastDate <= DEBOUNCE_MS) {
             // 同一人 3 秒内连续发的合成一条
-            mergeInto(open, body || (attachments ? ATTACHMENT_ONLY_TEXT : ''));
+            mergeInto(open, body);
             return;
         }
-        // R2：并入同一人前 60 秒内缓冲的普通消息——附件一律并入，文字只在本条正文为空时取最近一条
-        const item = Object.assign(newItem([]), target);
+        // Q2：并入同一人前 60 秒内缓冲的全部消息（文字和附件）；被引用的那条不再作为「@ 之前的消息」重复出现
+        const item = Object.assign(newItem(), target);
         const earlier = bufferedBefore(chatId, fromId, time);
-        const withFiles = earlier.filter((m) => m.hasFiles);
-        const prevText = body ? undefined : earlier.filter((m) => m.text).at(-1);
-        const used = [...new Set([...withFiles, ...(prevText ? [prevText] : [])])].sort((a, b) => a.date - b.date);
-        for (const m of withFiles)
-            mergeAttachments(item.files, m.files);
-        mergeAttachments(item.files, files);
-        const ago = (m) => Math.max(0, Math.round((time - m.date) / 1000));
-        if (body)
-            item.texts.push(body.slice(0, ITEM_TEXT_MAX));
-        else if (prevText) {
-            item.texts.push(`（以下是该用户在 @ 前 ${ago(prevText)} 秒发的消息）\n${prevText.text}`);
+        for (const m of earlier) {
+            if (m.messageId === event.parentId)
+                continue;
+            addPart(item, {
+                messageId: m.messageId,
+                text: m.text,
+                files: m.hasFiles ? m.files : { refs: [], rejected: [] },
+                hasFiles: m.hasFiles,
+                pre: true,
+                ...(m.forward ? { forward: true } : {}),
+            });
         }
-        else if (hasFiles(item))
-            item.texts.push(ATTACHMENT_ONLY_TEXT);
-        const first = withFiles[0];
-        if (first) {
-            item.texts.push(`（该用户在 @ 前 ${ago(first)} 秒内发的 ${withFiles.length} 条图片/文件消息已并入本条）`);
-        }
-        item.messageIds = [...used.map((m) => m.messageId), messageId];
-        unbuffer(chatId, fromId, used);
-        if (item.texts.length === 0) {
-            // R3：前面也没有内容，等这个人的后一条
+        unbuffer(chatId, fromId, earlier);
+        addPart(item, partOf(body));
+        const hasContent = item.parts.some((p) => p.text || p.hasFiles || p.forward || (!p.pre && p.parentId));
+        if (!hasContent) {
+            // R3：前后都没有内容，等这个人的后一条
             item.awaiting = true;
             item.readyAt = now() + CONTEXT_WINDOW_MS;
         }
         else {
-            item.readyAt = now() + readyDelay(item);
+            scheduleReady(item);
         }
         enqueue(item);
+    };
+    /** FS4：消息撤回。缓冲里的删掉；还没开始投递的条目去掉这条的内容，空了整条丢弃；已开始投递的不管 */
+    const handleRecalled = (chatId, messageId) => {
+        if (!groupOf(chatId))
+            return;
+        const senders = buffers.get(chatId);
+        for (const [fromId, list] of senders ?? []) {
+            const left = list.filter((m) => m.messageId !== messageId);
+            if (left.length === list.length)
+                continue;
+            if (left.length > 0)
+                senders?.set(fromId, left);
+            else
+                senders?.delete(fromId);
+        }
+        const queue = queues.get(chatId);
+        if (!queue)
+            return;
+        for (const item of [...queue]) {
+            if (item.started || !item.messageIds.includes(messageId))
+                continue;
+            item.parts = item.parts.filter((p) => p.messageId !== messageId);
+            item.messageIds = item.messageIds.filter((id) => id !== messageId);
+            const own = item.parts.filter((p) => !p.pre);
+            if (own.length === 0) {
+                // 只剩 @ 之前的上下文（或什么都没剩）：整条丢弃
+                queue.splice(queue.indexOf(item), 1);
+                discardFiles([item]);
+                continue;
+            }
+            if (item.replyTo === messageId)
+                item.replyTo = own[0]?.messageId ?? item.replyTo;
+            item.files = { refs: [], rejected: [] };
+            for (const part of item.parts)
+                mergeAttachments(item.files, part.files);
+        }
+        if (queue.length === 0)
+            queues.delete(chatId);
     };
     const handleBotAdded = (chatId, name) => {
         const group = groupOf(chatId);
@@ -991,6 +1142,10 @@ export function createFeishuService(deps) {
                     onMessage: (event) => {
                         if (!signal.aborted)
                             handleMessage(event);
+                    },
+                    onRecalled: (chatId, messageId) => {
+                        if (!signal.aborted)
+                            handleRecalled(chatId, messageId);
                     },
                     onBotAdded: (chatId, name) => {
                         if (!signal.aborted)
@@ -1084,7 +1239,7 @@ export function createFeishuService(deps) {
      */
     const forwardItem = (item, workspaceId, from) => {
         item.forwarded = true;
-        const { workspaceId: _from, reported: _reported, forwarded: _forwarded, lateRejected: _late, ...rest } = item;
+        const { workspaceId: _from, reported: _reported, forwarded: _forwarded, lateRejected: _late, body: _body, ...rest } = item;
         const copy = { ...rest, forward: { workspaceId, from }, readyAt: now() };
         const queue = queues.get(item.chatId) ?? [];
         queue.unshift(copy);
@@ -1133,7 +1288,7 @@ export function createFeishuService(deps) {
                 status: 'unreported',
                 title: '',
                 summary: '',
-                content: item.texts.join('\n').slice(0, ITEM_TEXT_MAX),
+                content: cardContent(item.body),
                 messageId: item.replyTo,
                 botMessageIds: [],
                 followUps: 0,

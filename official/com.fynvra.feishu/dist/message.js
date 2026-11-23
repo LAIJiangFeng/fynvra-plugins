@@ -1,5 +1,6 @@
 // 飞书消息内容解析（纯函数），格式以飞书「接收消息内容」文档为准：
-// text 取 text 并按 mentions 处理 @；post 按段取文字、@、链接、图片；image / file 当附件；其余类型列为未处理。
+// text 取 text 并按 mentions 处理 @；post 按段取文字、@、链接、图片；image / file 当附件；
+// merge_forward 只标记（子消息要另外调接口读）；其余类型列为未处理。
 import { addRef, displayName } from './attachments.js';
 import { isFeishuId } from './feishuApi.js';
 import { asRecord } from './util.js';
@@ -7,7 +8,6 @@ import { asRecord } from './util.js';
 const UNSUPPORTED = {
     audio: '语音',
     media: '视频',
-    merge_forward: '合并转发',
     interactive: '卡片消息',
     share_chat: '群名片',
     share_user: '个人名片',
@@ -150,6 +150,8 @@ export function parseMessage(event, botOpenId) {
             // 表情包不支持，也不算反馈（例如回复机器人一个表情）
             files.rejected.push({ name: '表情包', reason: 'unsupported' });
             break;
+        case 'merge_forward':
+            return { text: '', mentioned, files, hasFiles: false, forward: true };
         case 'system':
             return null;
         default:

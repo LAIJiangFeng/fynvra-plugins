@@ -6,10 +6,14 @@ import { asRecord, errorMessage } from './util.js';
 export const FEISHU_DOMAIN = 'https://open.feishu.cn';
 export class FeishuApiError extends Error {
     kind;
-    constructor(kind, message) {
+    /** 飞书的业务错误码（有的话） */
+    code;
+    constructor(kind, message, code) {
         super(message);
         this.name = 'FeishuApiError';
         this.kind = kind;
+        if (code !== undefined)
+            this.code = code;
     }
 }
 /** App ID 的格式（同 SDK 长连接的检查，不合格式的 SDK 会静默不连） */
@@ -155,13 +159,13 @@ export function createFeishuApi(options) {
         const code = typeof body?.code === 'number' ? body.code : undefined;
         const text = redact(`${label}: ${describeError(error)}`);
         if (status === 429 || (code !== undefined && RATE_LIMIT_CODES.has(code))) {
-            return new FeishuApiError('rate-limited', text);
+            return new FeishuApiError('rate-limited', text, code);
         }
         if (status === 401 || (code !== undefined && TOKEN_CODES.has(code))) {
-            return new FeishuApiError('unauthorized', text);
+            return new FeishuApiError('unauthorized', text, code);
         }
         if (response)
-            return new FeishuApiError('api', text);
+            return new FeishuApiError('api', text, code);
         // SDK 取 tenant_access_token 失败（HTTP 200 但业务出错）：只带错误码和说明
         const token = /failed to get \w*access_token, code: (\S+), msg: (.*)$/.exec(errorMessage(error));
         if (token) {
@@ -187,7 +191,7 @@ export function createFeishuApi(options) {
                     ? 'rate-limited'
                     : code !== undefined && TOKEN_CODES.has(code)
                         ? 'unauthorized'
-                        : 'api', redact(`${label}: code ${code ?? '?'} ${msg}`.trim()));
+                        : 'api', redact(`${label}: code ${code ?? '?'} ${msg}`.trim()), code);
             }
             catch (thrown) {
                 error = classify(label, thrown);
@@ -305,6 +309,18 @@ export function createFeishuApi(options) {
             const contentType = typeof headers['content-type'] === 'string' ? headers['content-type'] : '';
             return { data: Buffer.concat(chunks), contentType };
         },
+        async getMessage(creds, messageId, timeoutMs) {
+            if (!isFeishuId(messageId))
+                throw new FeishuApiError('api', 'messages/get: bad message id');
+            const body = await call(creds, 'messages/get', {
+                method: 'GET',
+                url: `open-apis/im/v1/messages/${messageId}`,
+                params: { user_id_type: 'open_id' },
+                timeout: timeoutMs,
+            });
+            const items = asRecord(body.data)?.items;
+            return (Array.isArray(items) ? items : []).flatMap((item) => parseFetchedMessage(item) ?? []);
+        },
         async connect(creds, events, status) {
             known.add(creds.appSecret);
             await refreshAgent();
@@ -324,6 +340,11 @@ export function createFeishuApi(options) {
                     const event = parseMessageEvent(data);
                     if (event)
                         events.onMessage(event);
+                }),
+                'im.message.recalled_v1': guarded('im.message.recalled_v1', (data) => {
+                    const r = asRecord(data);
+                    if (isFeishuId(r?.chat_id) && isFeishuId(r.message_id))
+                        events.onRecalled(r.chat_id, r.message_id);
                 }),
                 'im.chat.member.bot.added_v1': guarded('bot.added', (data) => {
                     const r = asRecord(data);
@@ -363,6 +384,37 @@ export function createFeishuApi(options) {
             }
             return { close: () => ws.close({ force: true }) };
         },
+    };
+}
+/**
+ * 「获取指定消息的内容」items 里的一条按 unknown 收窄（字段见开放平台文档该接口的响应体：
+ * message_id、msg_type、create_time、deleted、sender{id,id_type,sender_type}、body{content}、mentions[{key,id,id_type,name}]、upper_message_id）
+ */
+export function parseFetchedMessage(raw) {
+    const m = asRecord(raw);
+    if (!m || !isFeishuId(m.message_id))
+        return null;
+    const sender = asRecord(m.sender);
+    const createTime = Number(m.create_time);
+    const mentions = (Array.isArray(m.mentions) ? m.mentions : []).flatMap((item) => {
+        const r = asRecord(item);
+        if (typeof r?.key !== 'string' || r.key.length > 64)
+            return [];
+        // 这里的 id 是字符串，类型看 id_type（和事件里的 {open_id} 不同）
+        const openId = r.id_type === 'open_id' && isFeishuId(r.id) ? r.id : undefined;
+        return [{ key: r.key, ...(openId ? { openId } : {}), name: typeof r.name === 'string' ? r.name.slice(0, 64) : '' }];
+    });
+    const content = asRecord(m.body)?.content;
+    return {
+        messageId: m.message_id,
+        msgType: typeof m.msg_type === 'string' ? m.msg_type : '',
+        content: typeof content === 'string' ? content : '',
+        mentions,
+        senderId: isFeishuId(sender?.id) ? sender.id : '',
+        senderType: typeof sender?.sender_type === 'string' ? sender.sender_type : '',
+        createTime: Number.isFinite(createTime) ? createTime : 0,
+        ...(isFeishuId(m.upper_message_id) ? { upperMessageId: m.upper_message_id } : {}),
+        deleted: m.deleted === true,
     };
 }
 /** im.message.receive_v1 的事件体按 unknown 收窄；不合法返回 null */
