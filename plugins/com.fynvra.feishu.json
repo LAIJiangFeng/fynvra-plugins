@@ -15,6 +15,12 @@
       "commit": "25f3b4e44ee185c981b2db1920f1446febdf5e85",
       "path": "official/com.fynvra.feishu",
       "changelog": "首个版本：飞书群聊和私聊反馈值班"
+    },
+    {
+      "version": "0.1.1",
+      "commit": "45c464d41d4506fcb1f640f6280947c867c0a546",
+      "path": "official/com.fynvra.feishu",
+      "changelog": "引用回复时读取被引用的消息；话题里读第一条消息；支持合并转发的聊天记录；@ 前后同一人发的文字一起读；投递前撤回的消息不再投递"
     }
   ]
 }
