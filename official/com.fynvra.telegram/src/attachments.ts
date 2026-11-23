@@ -76,13 +76,26 @@ export function pickPhoto(photo: unknown[]): string | 'too-large' | null {
   return any ? 'too-large' : null;
 }
 
-/** 把一条消息的附件加进条目（超出数量上限的记为 limit）；返回这条消息是否带了附件（贴纸不算） */
-export function addMessageAttachments(target: ItemAttachments, message: TgMessage): boolean {
+/** 带附件的消息：本条消息，或被引用的消息（外部数据，逐项收窄） */
+export type AttachmentSource = Pick<
+  Partial<Record<keyof TgMessage, unknown>>,
+  'message_id' | 'photo' | 'document' | 'video' | 'animation' | 'sticker' | 'voice' | 'video_note' | 'audio'
+>;
+
+/**
+ * 把一条消息的附件加进条目（超出数量上限的记为 limit）；返回这条消息是否带了附件（贴纸不算）。
+ * prefix 加在未处理附件的名称前（被引用的消息用「引用的消息里的」）。
+ */
+export function addMessageAttachments(
+  target: ItemAttachments,
+  message: AttachmentSource,
+  prefix = ''
+): boolean {
   const reject = (name: string, reason: AttachmentRejectReason) =>
-    target.rejected.push({ name, reason });
+    target.rejected.push({ name: `${prefix}${name}`, reason });
   const add = (kind: AttachmentRef['kind'], fileId: string, name: string) =>
     addRef(target, { kind, fileId, name });
-  const id = message.message_id;
+  const id = typeof message.message_id === 'number' ? message.message_id : 'quote';
   const before = target.refs.length + target.rejected.length;
   const unsupported: [unknown, string][] = [
     [message.video, '视频'],

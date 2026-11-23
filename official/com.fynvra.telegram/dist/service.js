@@ -5,6 +5,7 @@
 import { isTelegramRateLimit, maskTelegramToken, } from './model.js';
 import { addMessageAttachments, cleanupStaleAttachments, downloadAttachments, mergeAttachments, rejectionSummary, removeFiles, } from './attachments.js';
 import { dutyPrompt, MAX_FOLLOW_UPS, parseAssessment, parseBotMention, parseBugCommand, parseTriageInput, pullRequestSection, TEMPLATES, triagePrompt, } from './content.js';
+import { displayName, FORWARDED_MARK, isForwarded, readReply } from './quote.js';
 import { createTelegramStore, emptyTelegramData, MAX_CANDIDATES, MAX_CARDS, parseModelRef, parseTelegramData, PROJECT_NOTE_MAX, TOKEN_SECRET_KEY, } from './store.js';
 import { redactToken, TELEGRAM_TOKEN_PATTERN, TelegramApiError, } from './telegramApi.js';
 import { asRecord, errorMessage } from './util.js';
@@ -29,6 +30,15 @@ const SUPPLEMENT_TEXT = '（补充了附件）';
 export const CONTEXT_WINDOW_MS = 60_000;
 /** 有正文、没有附件的条目投递前等图的时间（R4） */
 export const ATTACH_WAIT_MS = 8_000;
+/** 条目创建后连续并入消息时最多等这么久就投递（Q3） */
+export const MAX_GATHER_MS = 30_000;
+/** @ 前缓冲文字合计上限（Q2，与飞书插件一致） */
+export const PRE_TEXT_MAX = 2_000;
+/** 核心 channel.prompt 的 text 上限（UTF-8 字节），投递正文必须小于它 */
+const MAX_PROMPT_BYTES = 64 * 1024;
+const TRUNCATED_MARK = '（过长，已截断）';
+/** 只引用了一条消息并 @、自己没写字时的正文 */
+const QUOTE_ONLY_TEXT = '（只 @ 了机器人，并引用了一条消息）';
 const BUFFER_PER_SENDER = 10;
 const BUFFER_SENDERS_PER_GROUP = 200;
 /** 还在分诊阶段、回复它就是对这张卡片的追问回复的状态；其余状态的卡片被回复时按新反馈处理 */
@@ -50,9 +60,79 @@ const CHANNEL_STATUSES = [
     'missing',
 ];
 const isBusy = (status) => status === 'running' || status === 'waiting-approval';
-function displayName(user) {
-    const name = [user.first_name, user.last_name].filter(Boolean).join(' ').trim();
-    return (name || user.username || '匿名').slice(0, 128);
+/** 条目正文：所在话题、@ 前的消息、正文（含并入的后续消息）、引用段 */
+function itemText(item) {
+    return [
+        item.topic ? `所在话题：${item.topic}` : '',
+        item.pre ?? '',
+        ...item.texts,
+        ...(item.quotes ?? []),
+    ]
+        .filter(Boolean)
+        .join('\n');
+}
+/** 卡片保存的原始内容：限 ITEM_TEXT_MAX，引用段留一半位置，追问时也看得到 */
+function cardContent(item) {
+    const quotes = (item.quotes ?? []).join('\n').slice(0, ITEM_TEXT_MAX / 2);
+    const head = itemText({ ...item, quotes: [] }).slice(0, ITEM_TEXT_MAX - quotes.length - 1);
+    return [head, quotes].filter(Boolean).join('\n');
+}
+/** 按 UTF-8 字节截取前面不超过 max 字节（不切开字符） */
+function cutBytes(text, max) {
+    let size = 0;
+    let out = '';
+    for (const ch of text) {
+        size += Buffer.byteLength(ch);
+        if (size > max)
+            break;
+        out += ch;
+    }
+    return out;
+}
+/**
+ * Q4：投递正文超过核心上限时依次截短引用文字、@ 前的消息，最后是正文本身，直到小于上限。
+ * build 把各部分拼成完整正文（含转义）。
+ */
+export function fitPrompt(parts, build) {
+    let current = parts;
+    let prompt = build(current);
+    for (const key of ['quotes', 'pre', 'texts']) {
+        const over = Buffer.byteLength(prompt) - (MAX_PROMPT_BYTES - 1);
+        if (over <= 0)
+            break;
+        const value = current[key];
+        const text = Array.isArray(value) ? value.join('\n') : (value ?? '');
+        if (!text)
+            continue;
+        // 多留 256 字节余量给截断标注；截掉的原文字节不少于转义后减少的字节
+        const cut = `${cutBytes(text, Buffer.byteLength(text) - over - 256)}${TRUNCATED_MARK}`;
+        current = { ...current, [key]: key === 'pre' ? cut : [cut] };
+        prompt = build(current);
+    }
+    return prompt;
+}
+/** Q2：@ 前缓冲里的文字，按时间顺序，合计最多 PRE_TEXT_MAX 字；超出时保留最近的 */
+function preText(list) {
+    const kept = [];
+    let size = 0;
+    for (const { text } of [...list].reverse()) {
+        if (!text)
+            continue;
+        if (size + text.length > PRE_TEXT_MAX) {
+            // 最近的一条就超长：截断它；否则丢掉更早的
+            if (kept.length === 0)
+                kept.push(`${text.slice(0, PRE_TEXT_MAX)}${TRUNCATED_MARK}`);
+            break;
+        }
+        kept.push(text);
+        size += text.length;
+    }
+    if (kept.length === 0)
+        return undefined;
+    return [
+        `（以下是该用户在 @ 前 1 分钟内发的 ${kept.length} 条消息，可能是这条反馈的上下文）`,
+        ...kept.reverse(),
+    ].join('\n');
 }
 function isGroupChat(chat) {
     return chat?.type === 'group' || chat?.type === 'supergroup';
@@ -545,7 +625,7 @@ export function createTelegramService(deps) {
                 : group.projects
                     .filter((p) => p.workspaceId !== workspaceId)
                     .map((p) => ({ name: labels.get(p.workspaceId) ?? p.workspaceId, note: p.note }));
-            const prompt = triagePrompt({
+            const prompt = fitPrompt(item, (parts) => triagePrompt({
                 groupTitle: group.title,
                 ...(otherProjects.length > 0 ? { otherProjects } : {}),
                 ...(item.forward ? { forwardedFrom: item.forward.from } : {}),
@@ -570,10 +650,10 @@ export function createTelegramService(deps) {
                     : {}),
                 sender: item.sender,
                 messageIds: item.messageIds,
-                text: item.texts.join('\n'),
+                text: itemText(parts),
                 attachments: downloaded.attachments.length,
                 rejected: rejectionSummary([...item.files.rejected, ...downloaded.rejected]),
-            });
+            }));
             // 先登记在途条目：triage_report 可能在 prompt 返回前就到
             await applyPendingModel(sessionId, 'triage');
             const pending = { ...item, workspaceId, reported: false };
@@ -625,7 +705,7 @@ export function createTelegramService(deps) {
     };
     /** 整轮没有调用 triage_report：电脑上记一笔，群里用固定模板回复原消息 */
     const recordUnreported = (item) => {
-        const text = item.texts.join('\n');
+        const text = cardContent(item);
         warn(`分诊会话这一轮没有调用 triage_report（群 ${item.chatId}）`);
         const group = groupOf(item.chatId);
         if (!group)
@@ -647,7 +727,7 @@ export function createTelegramService(deps) {
             status: 'unreported',
             title: text.replace(/\s+/g, ' ').slice(0, 80),
             summary: '',
-            content: text.slice(0, ITEM_TEXT_MAX),
+            content: text,
             messageId: item.replyTo,
             botMessageIds: [],
             followUps: 0,
@@ -750,6 +830,12 @@ export function createTelegramService(deps) {
         const attachments = addMessageAttachments(files, message);
         const time = message.date * 1000;
         const mediaGroupId = typeof message.media_group_id === 'string' ? message.media_group_id : undefined;
+        // TG5：转发来的消息在文字前标明，不写原作者
+        const forwarded = isForwarded(message);
+        const mark = (s) => (s && forwarded ? `${FORWARDED_MARK}${s}` : s);
+        // Q1 / TG1–TG4：被引用的消息与所在话题
+        const reply = readReply(message, bot.id);
+        const quoted = reply.quoted;
         const queue = queues.get(chat.id) ?? [];
         pruneContext(chat.id, time);
         // 这个人还没开始投递的最新条目（已开始下载或投递的不再并入）
@@ -757,7 +843,7 @@ export function createTelegramService(deps) {
         if (mediaGroupId !== undefined && open?.mediaGroupId === mediaGroupId) {
             // 相册的其余消息（通常没有配文和 @）：并入同一人同一相册的条目，不再计限流
             if (text.trim())
-                open.texts.push(text.trim().slice(0, ITEM_TEXT_MAX));
+                open.texts.push(mark(text.trim()).slice(0, ITEM_TEXT_MAX));
             open.messageIds.push(message.message_id);
             mergeAttachments(open.files, files);
             open.lastDate = time;
@@ -767,9 +853,7 @@ export function createTelegramService(deps) {
         }
         if (!text && !attachments)
             return;
-        const repliedId = message.reply_to_message?.from?.id === bot.id
-            ? message.reply_to_message.message_id
-            : undefined;
+        const repliedId = quoted?.fromBot ? quoted.messageId : undefined;
         let body;
         let target = {};
         if (repliedId !== undefined) {
@@ -783,18 +867,42 @@ export function createTelegramService(deps) {
             body =
                 parseBugCommand(text, bot.username) ??
                     parseBotMention(text, entities, bot.username);
+            // 引用了某张卡片的原始反馈消息：作新反馈，那张卡片只作背景
+            const quotedId = quoted?.messageId;
+            const card = body === null || quotedId === undefined
+                ? undefined
+                : [...data.cards].reverse().find((c) => c.chatId === chat.id && c.messageId === quotedId);
+            if (card)
+                target = { contextCardId: card.id };
         }
-        const caption = text.trim();
+        if (body !== null)
+            body = mark(body);
+        const caption = mark(text.trim());
+        /** 这条消息要投递：带上所在话题、引用段和被引用消息的附件（与自己的附件共用数量上限） */
+        const addQuote = (item) => {
+            if (reply.topic && !item.topic)
+                item.topic = reply.topic;
+            if (!quoted)
+                return;
+            (item.quotes ??= []).push(quoted.segment);
+            mergeAttachments(item.files, quoted.files);
+            // 被引用的消息还在这个人的缓冲里：去掉，免得再作为「@ 之前的消息」出现
+            const dup = (buffers.get(chat.id)?.get(from.id) ?? []).filter((m) => m.messageId === quoted.messageId);
+            if (dup.length > 0)
+                unbuffer(chat.id, from.id, dup);
+        };
         /** 把这条消息并入已有条目，重新计算投递时间 */
         const mergeInto = (item, content) => {
             if (content)
                 item.texts.push(content.slice(0, ITEM_TEXT_MAX));
             item.messageIds.push(message.message_id);
             mergeAttachments(item.files, files);
+            addQuote(item);
             if (mediaGroupId !== undefined)
                 item.mediaGroupId = mediaGroupId;
             item.lastDate = time;
-            item.readyAt = now() + readyDelay(item);
+            // Q3：每并入一条重新计时，但从开始收集算起最多等 MAX_GATHER_MS
+            item.readyAt = Math.min(now() + readyDelay(item), item.gatherStart + MAX_GATHER_MS);
             scheduleChat(chat.id, 0);
         };
         /** 并入的后一条：标明来源（插件生成的说明，用户原文接在后面） */
@@ -832,23 +940,27 @@ export function createTelegramService(deps) {
             ...(mediaGroupId !== undefined ? { mediaGroupId } : {}),
             lastDate: time,
             readyAt: now(),
+            gatherStart: now(),
             outcome: {},
         });
         // R3：等待中的空 @ 收到同一人的下一条（普通消息或反馈都算），并入后按正常节奏投递；不另计限流
         if (open?.awaiting && now() < open.readyAt) {
             const content = after(body ?? caption);
-            if (!content) {
+            if (!content && !quoted) {
                 open.messageIds.push(message.message_id); // 又一个空 @：继续等
                 return;
             }
             open.awaiting = false;
+            open.gatherStart = now();
             mergeInto(open, content);
             return;
         }
         if (body === null) {
             // 普通消息
-            if (open && !open.awaiting && attachments) {
-                // R4：还没投递的条目在等图，附件和配文一起并入
+            if (open &&
+                !open.awaiting &&
+                (attachments || ((caption || quoted) && now() < open.readyAt))) {
+                // R4：还没投递的条目在等图，附件和配文一起并入；Q3：还在等待里时纯文字（及其引用）也并入
                 mergeInto(open, after(caption));
                 return;
             }
@@ -859,6 +971,7 @@ export function createTelegramService(deps) {
                     return;
                 const item = newItem([`${SUPPLEMENT_TEXT}${caption}`.slice(0, ITEM_TEXT_MAX)]);
                 mergeAttachments(item.files, files);
+                addQuote(item);
                 item.supplementOf = source.outcome;
                 item.readyAt = now() + readyDelay(item);
                 enqueue(item);
@@ -885,30 +998,35 @@ export function createTelegramService(deps) {
             mergeInto(open, body || (attachments ? ATTACHMENT_ONLY_TEXT : ''));
             return;
         }
-        // R2：并入同一人前 60 秒内缓冲的普通消息——附件一律并入，文字只在本条正文为空时取最近一条
+        // R2 / Q2：并入同一人前 60 秒内缓冲的全部普通消息——附件一律并入，文字按时间顺序带上（被引用的那条除外）
         const item = Object.assign(newItem([]), target);
-        const earlier = bufferedBefore(chat.id, from.id, time);
-        const withFiles = earlier.filter((m) => m.hasFiles);
-        const prevText = body ? undefined : earlier.filter((m) => m.text).at(-1);
-        const used = [...new Set([...withFiles, ...(prevText ? [prevText] : [])])].sort((a, b) => a.date - b.date || a.messageId - b.messageId);
+        const used = bufferedBefore(chat.id, from.id, time)
+            .filter((m) => quoted?.messageId === undefined || m.messageId !== quoted.messageId)
+            .sort((a, b) => a.date - b.date || a.messageId - b.messageId);
+        const withFiles = used.filter((m) => m.hasFiles);
         for (const m of withFiles)
             mergeAttachments(item.files, m.files);
         mergeAttachments(item.files, files);
+        const ownFiles = hasFiles(item);
+        addQuote(item);
+        const pre = preText(used);
+        if (pre)
+            item.pre = pre;
         const ago = (m) => Math.max(0, Math.round((time - m.date) / 1000));
         if (body)
             item.texts.push(body.slice(0, ITEM_TEXT_MAX));
-        else if (prevText) {
-            item.texts.push(`（以下是该用户在 @ 前 ${ago(prevText)} 秒发的消息）\n${prevText.text}`);
-        }
-        else if (hasFiles(item))
+        else if (!pre && ownFiles)
             item.texts.push(ATTACHMENT_ONLY_TEXT);
+        // 只引用 + @：算有内容，不走「空 @ 等下一条」
+        else if (quoted)
+            item.texts.push(QUOTE_ONLY_TEXT);
         const first = withFiles[0];
         if (first) {
             item.texts.push(`（该用户在 @ 前 ${ago(first)} 秒内发的 ${withFiles.length} 条图片/文件消息已并入本条）`);
         }
         item.messageIds = [...used.map((m) => m.messageId), message.message_id];
         unbuffer(chat.id, from.id, used);
-        if (item.texts.length === 0) {
+        if (item.texts.length === 0 && !item.pre) {
             // R3：前面也没有内容，等这个人的后一条
             item.awaiting = true;
             item.readyAt = now() + CONTEXT_WINDOW_MS;
@@ -1084,7 +1202,7 @@ export function createTelegramService(deps) {
                 status: 'unreported',
                 title: '',
                 summary: '',
-                content: item.texts.join('\n').slice(0, ITEM_TEXT_MAX),
+                content: cardContent(item),
                 messageId: item.replyTo,
                 botMessageIds: [],
                 followUps: 0,

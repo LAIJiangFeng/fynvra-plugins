@@ -47,11 +47,14 @@ export function pickPhoto(photo) {
         return best.fileId;
     return any ? 'too-large' : null;
 }
-/** 把一条消息的附件加进条目（超出数量上限的记为 limit）；返回这条消息是否带了附件（贴纸不算） */
-export function addMessageAttachments(target, message) {
-    const reject = (name, reason) => target.rejected.push({ name, reason });
+/**
+ * 把一条消息的附件加进条目（超出数量上限的记为 limit）；返回这条消息是否带了附件（贴纸不算）。
+ * prefix 加在未处理附件的名称前（被引用的消息用「引用的消息里的」）。
+ */
+export function addMessageAttachments(target, message, prefix = '') {
+    const reject = (name, reason) => target.rejected.push({ name: `${prefix}${name}`, reason });
     const add = (kind, fileId, name) => addRef(target, { kind, fileId, name });
-    const id = message.message_id;
+    const id = typeof message.message_id === 'number' ? message.message_id : 'quote';
     const before = target.refs.length + target.rejected.length;
     const unsupported = [
         [message.video, '视频'],

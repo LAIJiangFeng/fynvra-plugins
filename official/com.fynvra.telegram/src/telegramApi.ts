@@ -81,7 +81,14 @@ export interface TgMessage {
   audio?: unknown;
   /** 相册：同一组的图片各是一条消息，配文只在其中一条 */
   media_group_id?: string;
-  reply_to_message?: { message_id: number; from?: TgUser };
+  /** 被回复的消息（外部数据，形状同 TgMessage 但不可信，用 readReply 收窄） */
+  reply_to_message?: unknown;
+  /** 部分引用：{ text }（外部数据） */
+  quote?: unknown;
+  /** 引用其他会话的消息（外部数据） */
+  external_reply?: unknown;
+  /** 转发来源（外部数据；只看有没有，不读原作者） */
+  forward_origin?: unknown;
   migrate_to_chat_id?: number;
   migrate_from_chat_id?: number;
 }
