@@ -21,7 +21,36 @@ export const ACTIONS = {
     dutyThinking: 'thinking.duty',
     approve: 'card.approve',
     reject: 'card.reject',
+    bindCode: 'maintainer.code',
+    unbind: 'maintainer.unbind',
 };
+const BIND_HINT = '用要绑定的 Telegram 账号打开下面的链接（会打开和机器人的私聊并自动发送），或在和机器人的私聊里发送 /start <码>。10 分钟内有效。';
+/** 「维护者」分组：当前绑定、生成绑定码、解除绑定 */
+function maintainerNodes(state) {
+    const nodes = [
+        { type: 'keyValue', items: [{ label: '维护者', value: state.maintainer?.label ?? '未绑定' }] },
+        { type: 'button', label: '生成绑定码', action: ACTIONS.bindCode },
+    ];
+    if (state.maintainer) {
+        nodes.push({
+            type: 'button',
+            label: '解除绑定',
+            action: ACTIONS.unbind,
+            tone: 'destructive',
+            confirm: '解除后他在群里提的需求按普通成员处理。确定解除绑定？',
+        });
+    }
+    const code = state.bindCode;
+    if (code) {
+        nodes.push({ type: 'text', text: BIND_HINT, tone: 'muted' });
+        const url = state.bot ? httpsUrl(`https://t.me/${state.bot.username}?start=${code.code}`) : null;
+        if (url) {
+            nodes.push({ type: 'list', items: [{ key: 'bindLink', title: clip(url, 200), link: { label: '打开', url } }] });
+        }
+        nodes.push({ type: 'text', text: `绑定码：${code.code}` });
+    }
+    return nodes;
+}
 const CONNECTION_TEXT = {
     'no-token': '未配置',
     connecting: '连接中…',
@@ -345,6 +374,7 @@ export function buildSettingsUi(state, workspaces, models, now = Date.now()) {
     return {
         children: [
             { type: 'section', title: '连接', children: connection },
+            { type: 'section', title: '维护者', children: maintainerNodes(state) },
             {
                 type: 'section',
                 title: '群',
@@ -543,6 +573,10 @@ models = null) {
                 return { ok: false, error: '只能处理待确认的需求' };
             return service.resolveCard(cardId, action === ACTIONS.approve ? 'approve' : 'reject');
         }
+        case ACTIONS.bindCode:
+            return service.createBindCode();
+        case ACTIONS.unbind:
+            return service.unbindMaintainer();
         default:
             return { ok: false, error: `未知操作：${String(action)}` };
     }

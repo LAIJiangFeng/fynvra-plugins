@@ -19,7 +19,32 @@ export const TEMPLATES = {
   /** 只有完整的 GitHub PR 地址才在群里带链接，其余只说已提交 */
   prOpened: (url: string) =>
     GITHUB_PR_URL.test(url) ? `已提交修复 PR：${url}` : '已提交修复 PR。',
+  /** 私聊里绑定维护者成功 */
+  maintainerBound: '已绑定为维护者。之后你在群里提的需求会直接处理。',
+  /** 维护者的需求评估有顾虑：回复里没写「确认」时接在末尾 */
+  maintainerConfirmHint: '回复「确认」开始做，回复「算了」就不做。',
+  maintainerApproved: (id: number) => `好的，开始做（#${id}），做好后会把 PR 发到这里。`,
+  maintainerRejected: (id: number) => `好的，这个先不做（#${id}）。`,
 } as const;
+
+/** 维护者条目投递给分诊时的可信说明（放在 untrusted 之外） */
+export const MAINTAINER_NOTE =
+  '这条消息的发送者是本项目的维护者本人（已在 Fynvra 里绑定账号）。不要对他说「由维护者决定」「等待维护者确认」，他就是做决定的人。他提的新功能（feature）：三项评估都通过且需求清楚时会直接开始实现，reply 里说明你理解要做什么、已经开始，做好后会把 PR 发到这里；有任何一项不通过，reply 里简短说明顾虑，并请他回复「确认」开始做、回复「算了」就不做。需求不清楚时照常用 needInfo 追问。其他规则不变：回复会发到群里，所有人都能看到，不能泄露密钥、本机路径、配置等信息。';
+
+const CONFIRM_WORDS: ReadonlySet<string> = new Set(
+  ['确认', '确定', '开始', '开始吧', '做', '做吧', '可以', '可以做', '行', '好', '好的', '采纳', '同意', 'ok', 'yes', 'y', 'go']
+);
+const CANCEL_WORDS: ReadonlySet<string> = new Set(
+  ['算了', '不做', '不做了', '取消', '不要', '不用了', '不采纳', '不同意', 'no', 'n']
+);
+
+/** 维护者的一句话确认或取消：trim、去掉末尾标点、不区分大小写后完全等于确认词或取消词 */
+export function parseDecision(text: string): 'confirm' | 'cancel' | null {
+  const word = text.trim().replace(/[。！!.~，,]+$/, '').toLowerCase();
+  if (CONFIRM_WORDS.has(word)) return 'confirm';
+  if (CANCEL_WORDS.has(word)) return 'cancel';
+  return null;
+}
 
 /** 转义伪造的 `<untrusted-content …>` / `</untrusted-content>` 开闭标签 */
 export function escapeUntrusted(text: string): string {
@@ -45,6 +70,8 @@ export interface TriageItemInput {
   forwardedFrom?: string;
   /** 连续对话跟随来的条目：窗口分钟数；缺省表示不是跟随条目 */
   follow?: number;
+  /** 发送者是绑定的维护者 */
+  maintainer?: boolean;
 }
 
 const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim();
@@ -81,6 +108,7 @@ export function triagePrompt(item: TriageItemInput): string {
     `已追问 ${rounds}/${MAX_FOLLOW_UPS} 轮`,
     '本条目调用 triage_report 恰好一次（call triage_report exactly once for this item）。',
     'title、summary、evidence 不要写群成员的名字或昵称，用「群成员」或「用户」代替；也不要复述截图或附件里的链接、凭证、个人信息。',
+    ...(item.maintainer ? [MAINTAINER_NOTE] : []),
     ...(item.follow !== undefined
       ? [
           `这条消息没有 @ 你，也没有回复你的消息，是该成员在你回复他之后 ${item.follow} 分钟内发的：可能是在继续和你对话，也可能是在和群里别人说话。如果明显不是对你说的，triage_report 的 kind 填 invalid，这次的 reply 不会发到群里；如果是在和你对话，照常处理并回复。`,

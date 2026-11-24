@@ -2,11 +2,12 @@
 // 轮询、群发现与准入、分诊投递、triage_report 处理、追问、值班投递、卡片与任务关联、PR 结果通知。
 // 群里只会收到经 api.channel.filterOutbound 过滤后的 triage 回复与固定模板。
 // 与内置版的差别只在依赖：会话、干净检出、编排快照、出站过滤、通知都走宿主 API（见 README「与内置版的差异」）。
+import { randomBytes } from 'node:crypto';
 import { isFollowMinutes, isTelegramRateLimit, maskTelegramToken, } from './model.js';
 import { addMessageAttachments, cleanupStaleAttachments, downloadAttachments, mergeAttachments, rejectionSummary, removeFiles, } from './attachments.js';
-import { dutyPrompt, MAX_FOLLOW_UPS, mentionsOthers, parseAssessment, parseBotMention, parseBugCommand, parseTriageInput, pullRequestSection, TEMPLATES, triagePrompt, } from './content.js';
+import { dutyPrompt, MAX_FOLLOW_UPS, mentionsOthers, parseAssessment, parseBotMention, parseBugCommand, parseDecision, parseTriageInput, pullRequestSection, TEMPLATES, triagePrompt, } from './content.js';
 import { displayName, FORWARDED_MARK, isForwarded, readReply } from './quote.js';
-import { createTelegramStore, emptyTelegramData, MAX_CANDIDATES, MAX_CARDS, parseModelRef, parseTelegramData, PROJECT_NOTE_MAX, TOKEN_SECRET_KEY, } from './store.js';
+import { createTelegramStore, emptyTelegramData, MAINTAINER_LABEL_MAX, MAX_CANDIDATES, MAX_CARDS, parseModelRef, parseTelegramData, PROJECT_NOTE_MAX, TOKEN_SECRET_KEY, } from './store.js';
 import { redactToken, TELEGRAM_TOKEN_PATTERN, TelegramApiError, } from './telegramApi.js';
 import { asRecord, errorMessage } from './util.js';
 export const DEBOUNCE_MS = 3_000;
@@ -43,6 +44,10 @@ const BUFFER_PER_SENDER = 10;
 const BUFFER_SENDERS_PER_GROUP = 200;
 /** 记住最近多少条已开始投递的消息 id（TG-E：再编辑时忽略） */
 const DELIVERED_MAX = 2_000;
+/** 维护者绑定码的有效期 */
+export const BIND_CODE_MS = 10 * 60_000;
+/** 维护者没指明卡片地说「确认 / 算了」时，只看这段时间内更新过的待确认卡片 */
+const DECISION_CARD_MS = 24 * 60 * 60_000;
 /** 还在分诊阶段、回复它就是对这张卡片的追问回复的状态；其余状态的卡片被回复时按新反馈处理 */
 const RETRIAGE_STATUSES = new Set([
     'asking',
@@ -193,6 +198,11 @@ export function createTelegramService(deps) {
     const pendingModel = new Set();
     /** 所选模型不可用、已改用默认（设置页提示用） */
     let modelFallback = false;
+    /** 维护者绑定码：只在内存里，同时只有一个；到期时刷新设置页 */
+    let bindCode;
+    let bindTimer;
+    const isMaintainer = (userId) => data.maintainer?.userId === userId;
+    const validBindCode = () => (bindCode && now() < bindCode.expiresAt ? bindCode : undefined);
     const safe = (text) => redactToken(text, data.token);
     const warn = (message) => api.log('warn', safe(message));
     const notify = (title, body) => {
@@ -669,6 +679,7 @@ export function createTelegramService(deps) {
                 ...(otherProjects.length > 0 ? { otherProjects } : {}),
                 ...(item.forward ? { forwardedFrom: item.forward.from } : {}),
                 ...(item.follow ? { follow: data.followMinutes } : {}),
+                ...(isMaintainer(item.fromId) ? { maintainer: true } : {}),
                 ...(card
                     ? {
                         card: {
@@ -836,10 +847,48 @@ export function createTelegramService(deps) {
         rate.set(userId, recent);
         return false;
     };
+    /** 采纳需求：交给值班会话（设置页「采纳」与维护者「确认」共用） */
+    const approveCard = (card) => {
+        card.updatedAt = now();
+        card.status = 'fixing';
+        card.duty = 'queued';
+        commit();
+        void pumpDuty(card.workspaceId);
+    };
+    /**
+     * M1：私聊里只认「/start <有效的绑定码>」，把发送者绑定为维护者；
+     * 其余私聊（含码不对、过期）一律忽略、不回复，免得被探测。
+     */
+    const handlePrivate = (message) => {
+        const from = message.from;
+        const code = validBindCode();
+        if (!from || from.is_bot || !code || !Number.isSafeInteger(from.id))
+            return;
+        if (typeof message.text !== 'string' || message.text.trim() !== `/start ${code.code}`)
+            return;
+        bindCode = undefined;
+        clearTimeout(bindTimer);
+        const name = displayName(from);
+        const username = typeof from.username === 'string' && from.username ? ` (@${from.username})` : '';
+        const label = `${name}${username}`.slice(0, MAINTAINER_LABEL_MAX);
+        data.maintainer = { userId: from.id, label, boundAt: now() };
+        commit();
+        notify('Telegram 维护者', `已绑定维护者：${label}`);
+        const token = data.token;
+        if (!token)
+            return;
+        deps.telegram
+            .sendMessage(token, { chatId: message.chat.id, text: TEMPLATES.maintainerBound })
+            .catch((error) => warn(`发送绑定回复失败：${errorMessage(error)}`));
+    };
     const handleMessage = (message) => {
         const chat = message.chat;
+        if (chat?.type === 'private') {
+            handlePrivate(message);
+            return;
+        }
         if (!isGroupChat(chat))
-            return; // 私聊与频道一律忽略，不回复
+            return; // 其余私聊与频道一律忽略，不回复
         if (message.migrate_to_chat_id !== undefined) {
             migrateChat(chat.id, message.migrate_to_chat_id);
             return;
@@ -986,6 +1035,44 @@ export function createTelegramService(deps) {
             gatherStart: now(),
             outcome: {},
         });
+        // F2：连续对话窗口（followMinutes 为 0 时不生效）
+        const window = data.followMinutes > 0 ? follows.get(chat.id)?.get(from.id) : undefined;
+        const windowOpen = window !== undefined && now() < window.until;
+        // M3：维护者一句话确认或取消待确认的需求；他还有没投递的条目时不生效（还在打字，按 Q3 合并）
+        const mention = parseBotMention(text, entities, bot.username);
+        if (isMaintainer(from.id) && !open && (repliedId !== undefined || windowOpen || mention !== null)) {
+            const decision = parseDecision(mention ?? text);
+            const routed = target.cardId ?? target.contextCardId ?? (windowOpen ? window.cardId : undefined);
+            const routedCard = routed === undefined ? undefined : cardById(routed);
+            const card = decision === null
+                ? undefined
+                : (routedCard ??
+                    data.cards
+                        .filter((c) => c.chatId === chat.id &&
+                        c.status === 'pending-approval' &&
+                        now() - c.updatedAt <= DECISION_CARD_MS)
+                        .sort((a, b) => b.updatedAt - a.updatedAt)[0]);
+            if (decision !== null &&
+                card?.kind === 'feature' &&
+                (card.status === 'pending-approval' || card.status === 'declined')) {
+                // 马上处理：不投递分诊、不计限流、不新建卡片
+                markDelivered(chat.id, [message.message_id]);
+                if (decision === 'confirm') {
+                    approveCard(card);
+                }
+                else {
+                    card.status = 'rejected';
+                    card.updatedAt = now();
+                    commit();
+                }
+                const reply = decision === 'confirm'
+                    ? TEMPLATES.maintainerApproved(card.id)
+                    : TEMPLATES.maintainerRejected(card.id);
+                void sendToGroup(card, reply, message.message_id).then(commit);
+                openFollow(chat.id, from.id, card.id);
+                return;
+            }
+        }
         // R3：等待中的空 @ 收到同一人的下一条（普通消息或反馈都算），并入后按正常节奏投递；不另计限流
         if (open?.awaiting && now() < open.readyAt) {
             const content = after(body ?? caption);
@@ -998,9 +1085,6 @@ export function createTelegramService(deps) {
             mergeInto(open, content);
             return;
         }
-        // F2：连续对话窗口（followMinutes 为 0 时不生效）
-        const window = data.followMinutes > 0 ? follows.get(chat.id)?.get(from.id) : undefined;
-        const windowOpen = window !== undefined && now() < window.until;
         let follow = false;
         if (body === null) {
             // 普通消息
@@ -1376,10 +1460,26 @@ export function createTelegramService(deps) {
             }
             else if (report.kind === 'feature') {
                 const verdict = parseAssessment(report.assessment);
-                card.status = verdict === 'fail' ? 'declined' : 'pending-approval';
                 if (verdict === 'incomplete')
                     card.assessmentIncomplete = true;
-                await sendTriageReply(card, report.reply, replyTo);
+                if (isMaintainer(item.fromId)) {
+                    // M2：维护者的需求评估通过就直接采纳（同设置页「采纳」，末尾会 pumpDuty）；有顾虑就等他一句话确认
+                    if (verdict === 'pass') {
+                        card.status = 'fixing';
+                        card.duty = 'queued';
+                    }
+                    else {
+                        card.status = 'pending-approval';
+                        if (!report.reply.includes('确认')) {
+                            report.reply = `${report.reply}\n${TEMPLATES.maintainerConfirmHint}`;
+                        }
+                    }
+                    await sendTriageReply(card, report.reply, replyTo);
+                }
+                else {
+                    card.status = verdict === 'fail' ? 'declined' : 'pending-approval';
+                    await sendTriageReply(card, report.reply, replyTo);
+                }
                 if (card.status === 'pending-approval') {
                     notify('Telegram 新的待确认需求', `卡片 #${card.id}：${card.title}${verdict === 'incomplete' ? '（评估格式不完整）' : ''}`);
                 }
@@ -1672,6 +1772,8 @@ export function createTelegramService(deps) {
         ...(data.triageModel ? { triageModel: { ...data.triageModel } } : {}),
         ...(data.dutyModel ? { dutyModel: { ...data.dutyModel } } : {}),
         modelFallback,
+        ...(data.maintainer ? { maintainer: { label: data.maintainer.label } } : {}),
+        ...(bindCode && now() < bindCode.expiresAt ? { bindCode: { ...bindCode } } : {}),
     });
     /** 设置页改动：落盘成功后通知重画 */
     const commitOrError = async () => {
@@ -1776,6 +1878,8 @@ export function createTelegramService(deps) {
             stopped = true;
             clearInterval(maintenanceTimer);
             maintenanceTimer = undefined;
+            clearTimeout(bindTimer);
+            bindCode = undefined;
             for (const timer of [...chatTimers.values(), ...prChecks.values()])
                 clearTimeout(timer);
             chatTimers.clear();
@@ -1949,18 +2053,33 @@ export function createTelegramService(deps) {
             if (card?.status !== 'pending-approval') {
                 return { ok: false, error: '只能处理待确认的需求' };
             }
-            card.updatedAt = now();
             if (action === 'approve') {
-                card.status = 'fixing';
-                card.duty = 'queued';
-                commit();
-                void pumpDuty(card.workspaceId);
+                approveCard(card);
                 return { ok: true };
             }
+            card.updatedAt = now();
             card.status = 'rejected';
             await sendToGroup(card, TEMPLATES.rejected, card.messageId);
             commit();
             return { ok: true };
+        },
+        async createBindCode() {
+            clearTimeout(bindTimer);
+            const current = { code: randomBytes(12).toString('base64url'), expiresAt: now() + BIND_CODE_MS };
+            bindCode = current;
+            // 到期后作废并重画，设置页不再显示过期的码
+            bindTimer = setTimeout(() => {
+                if (bindCode === current)
+                    bindCode = undefined;
+                emit();
+            }, BIND_CODE_MS);
+            bindTimer.unref?.();
+            emit();
+            return { ok: true };
+        },
+        async unbindMaintainer() {
+            delete data.maintainer;
+            return commitOrError();
         },
         async setRateLimit(perHour) {
             if (!isTelegramRateLimit(perHour))

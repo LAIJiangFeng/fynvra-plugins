@@ -7,6 +7,8 @@ const TEXT_MAX = 4_000;
 /** api.secrets 里存 token 的键 */
 export const TOKEN_SECRET_KEY = 'botToken';
 export const PROJECT_NOTE_MAX = 200;
+/** 维护者名称上限 */
+export const MAINTAINER_LABEL_MAX = 128;
 export function emptyTelegramData() {
     return {
         candidates: [],
@@ -205,6 +207,20 @@ export function parseTelegramData(raw) {
     const dutyModel = parseModelRef(r.dutyModel);
     if (dutyModel)
         data.dutyModel = dutyModel;
+    const maintainer = asRecord(r.maintainer);
+    if (maintainer &&
+        isInt(maintainer.userId) &&
+        maintainer.userId > 0 &&
+        typeof maintainer.label === 'string' &&
+        maintainer.label.length >= 1 &&
+        maintainer.label.length <= MAINTAINER_LABEL_MAX &&
+        isNonNegative(maintainer.boundAt)) {
+        data.maintainer = {
+            userId: maintainer.userId,
+            label: maintainer.label,
+            boundAt: maintainer.boundAt,
+        };
+    }
     return data;
 }
 export function createTelegramStore(api) {

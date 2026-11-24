@@ -98,7 +98,12 @@ export interface TelegramData {
   /** 分诊 / 值班会话用的模型；缺省为默认 */
   triageModel?: ChannelModelRef;
   dutyModel?: ChannelModelRef;
+  /** 绑定的维护者（Telegram 用户 id，由服务器填写、不能伪造）；只能绑定一个人 */
+  maintainer?: { userId: number; label: string; boundAt: number };
 }
+
+/** 维护者名称上限 */
+export const MAINTAINER_LABEL_MAX = 128;
 
 export function emptyTelegramData(): TelegramData {
   return {
@@ -287,6 +292,22 @@ export function parseTelegramData(raw: unknown): TelegramData {
   if (triageModel) data.triageModel = triageModel;
   const dutyModel = parseModelRef(r.dutyModel);
   if (dutyModel) data.dutyModel = dutyModel;
+  const maintainer = asRecord(r.maintainer);
+  if (
+    maintainer &&
+    isInt(maintainer.userId) &&
+    maintainer.userId > 0 &&
+    typeof maintainer.label === 'string' &&
+    maintainer.label.length >= 1 &&
+    maintainer.label.length <= MAINTAINER_LABEL_MAX &&
+    isNonNegative(maintainer.boundAt)
+  ) {
+    data.maintainer = {
+      userId: maintainer.userId,
+      label: maintainer.label,
+      boundAt: maintainer.boundAt,
+    };
+  }
   return data;
 }
 

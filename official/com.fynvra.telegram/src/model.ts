@@ -104,6 +104,10 @@ export interface TelegramStateView {
   dutyModel?: ChannelModelRef;
   /** 带所选模型建会话或换模型失败过（已改用默认）；用户改选后清除 */
   modelFallback: boolean;
+  /** 绑定的维护者（只显示名称） */
+  maintainer?: { label: string };
+  /** 还有效的绑定码（只在内存里） */
+  bindCode?: { code: string; expiresAt: number };
 }
 
 /** 每人每小时限额：默认 5，可配 1–1000 */
