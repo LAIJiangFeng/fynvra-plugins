@@ -48,7 +48,7 @@
     },
     {
       "version": "0.1.9",
-      "commit": "ccce443cc48ca31e4d69afc7c9873522d5a17b66",
+      "commit": "50f3ab5efde90c859597df38e332c677c4949bb3",
       "path": "official/com.fynvra.telegram",
       "changelog": "绑定维护者账号：维护者在群里提的需求清楚合理就直接开始做，有顾虑时先说明、回复「确认」再做；维护者回复「确认 / 算了」即可采纳或放弃待确认的需求"
     }
