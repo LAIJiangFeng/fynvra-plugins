@@ -7,7 +7,7 @@ import type {
   TelegramConnection,
   TelegramStateView,
 } from './model.js';
-import { TELEGRAM_RATE_LIMIT_MAX } from './model.js';
+import { FOLLOW_MINUTES_MAX, TELEGRAM_RATE_LIMIT_MAX } from './model.js';
 import type { ActionResult, TelegramService } from './service.js';
 import { isThinkingLevel } from './model.js';
 import type {
@@ -33,6 +33,7 @@ export const ACTIONS = {
   setPrimary: 'project.primary',
   saveNote: 'project.note',
   saveRateLimit: 'rateLimit.save',
+  saveFollowMinutes: 'followMinutes.save',
   triageModel: 'model.triage',
   dutyModel: 'model.duty',
   triageThinking: 'thinking.triage',
@@ -435,6 +436,21 @@ export function buildSettingsUi(
             action: ACTIONS.saveRateLimit,
           },
           { type: 'text', text: '超出后提示一次，1–1000', tone: 'muted' },
+          {
+            type: 'field',
+            id: 'followMinutes',
+            label: '连续对话（分钟）',
+            kind: 'number',
+            value: state.followMinutes,
+            min: 0,
+            max: FOLLOW_MINUTES_MAX,
+            action: ACTIONS.saveFollowMinutes,
+          },
+          {
+            type: 'text',
+            text: '机器人回复某个成员后，这段时间内该成员不 @ 的消息也会读；明显不是对机器人说的不会回复。0 表示关闭，最多 60。',
+            tone: 'muted',
+          },
         ],
       },
       {
@@ -543,6 +559,10 @@ export async function handleUiAction(
     case ACTIONS.saveRateLimit: {
       const perHour = values.rateLimit;
       return service.setRateLimit(typeof perHour === 'number' ? perHour : Number.NaN);
+    }
+    case ACTIONS.saveFollowMinutes: {
+      const minutes = values.followMinutes;
+      return service.setFollowMinutes(typeof minutes === 'number' ? minutes : Number.NaN);
     }
     case ACTIONS.triageModel:
     case ACTIONS.dutyModel: {

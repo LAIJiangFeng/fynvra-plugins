@@ -30,6 +30,8 @@ export interface QuotedMessage {
   messageId?: number;
   /** 被引用的是本机器人发的消息 */
   fromBot: boolean;
+  /** 被引用消息的发送者 id（引用其他会话或没有发送者时缺省） */
+  fromId?: number;
   /** 插件生成的引用段（作者标签 + 文字 + 引用片段），外部文字在里面，投递时整段转义 */
   segment: string;
   /** 被引用消息里的图片、文件与未处理项 */
@@ -80,6 +82,7 @@ export function readReply(message: Pick<TgMessage, 'reply_to_message' | 'quote' 
       quoted: {
         ...(typeof reply.message_id === 'number' ? { messageId: reply.message_id } : {}),
         fromBot,
+        ...(typeof from?.id === 'number' ? { fromId: from.id } : {}),
         segment: segmentOf(`${author}${isForwarded(reply) ? FORWARDED_MARK : ''}`, quoteText(text), fragment),
         files,
       },

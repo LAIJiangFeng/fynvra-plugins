@@ -97,6 +97,8 @@ export interface TelegramStateView {
   cards: TelegramCardView[];
   /** 每人每小时最多处理几条 */
   rateLimitPerHour: number;
+  /** 连续对话：机器人在群里回复某成员后跟随他多少分钟（0 关闭） */
+  followMinutes: number;
   /** 分诊 / 值班会话用的模型（可带思考档位）；缺省为默认 */
   triageModel?: ChannelModelRef;
   dutyModel?: ChannelModelRef;
@@ -113,6 +115,16 @@ export function isTelegramRateLimit(value: unknown): value is number {
     Number.isSafeInteger(value) &&
     (value as number) >= 1 &&
     (value as number) <= TELEGRAM_RATE_LIMIT_MAX
+  );
+}
+
+/** 连续对话分钟数：默认 5，可配 0–60，0 表示关闭 */
+export const FOLLOW_MINUTES_DEFAULT = 5;
+export const FOLLOW_MINUTES_MAX = 60;
+
+export function isFollowMinutes(value: unknown): value is number {
+  return (
+    Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= FOLLOW_MINUTES_MAX
   );
 }
 

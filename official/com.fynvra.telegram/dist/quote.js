@@ -54,6 +54,7 @@ export function readReply(message, botId) {
             quoted: {
                 ...(typeof reply.message_id === 'number' ? { messageId: reply.message_id } : {}),
                 fromBot,
+                ...(typeof from?.id === 'number' ? { fromId: from.id } : {}),
                 segment: segmentOf(`${author}${isForwarded(reply) ? FORWARDED_MARK : ''}`, quoteText(text), fragment),
                 files,
             },

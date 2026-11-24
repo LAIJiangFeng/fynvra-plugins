@@ -3,6 +3,7 @@
 // 群里只会收到经 api.channel.filterOutbound 过滤后的 triage 回复与固定模板。
 // 与内置版的差别只在依赖：会话、干净检出、编排快照、出站过滤、通知都走宿主 API（见 README「与内置版的差异」）。
 import {
+  isFollowMinutes,
   isTelegramRateLimit,
   maskTelegramToken,
   type TelegramCardAction,
@@ -23,6 +24,7 @@ import {
 import {
   dutyPrompt,
   MAX_FOLLOW_UPS,
+  mentionsOthers,
   parseAssessment,
   parseBotMention,
   parseBugCommand,
@@ -98,6 +100,8 @@ const TRUNCATED_MARK = '（过长，已截断）';
 const QUOTE_ONLY_TEXT = '（只 @ 了机器人，并引用了一条消息）';
 const BUFFER_PER_SENDER = 10;
 const BUFFER_SENDERS_PER_GROUP = 200;
+/** 记住最近多少条已开始投递的消息 id（TG-E：再编辑时忽略） */
+const DELIVERED_MAX = 2_000;
 
 /** 还在分诊阶段、回复它就是对这张卡片的追问回复的状态；其余状态的卡片被回复时按新反馈处理 */
 const RETRIAGE_STATUSES: ReadonlySet<TelegramCardStatus> = new Set([
@@ -143,6 +147,8 @@ export interface TelegramService {
   resolveCard(cardId: number, action: TelegramCardAction): Promise<ActionResult>;
   /** 每人每小时限额（1–1000），落盘后立即生效 */
   setRateLimit(perHour: number): Promise<ActionResult>;
+  /** 连续对话分钟数（0–60，0 关闭），落盘后立即生效 */
+  setFollowMinutes(minutes: number): Promise<ActionResult>;
   /** 分诊 / 值班模型（null 为默认）：落盘后应用到已有会话，运行中的等下一次投递前补上 */
   setModel(kind: 'triage' | 'duty', model: ChannelModelRef | null): Promise<ActionResult>;
   onChange(listener: () => void): () => void;
@@ -195,6 +201,10 @@ interface QueuedItem {
   supplementOf?: { cardId?: number };
   /** 转交过来的条目：目标项目与转交方项目名（每条反馈最多转一次） */
   forward?: { workspaceId: string; from: string };
+  /** 连续对话跟随来的条目（F3）；并进一条不是跟随的消息后去掉 */
+  follow?: boolean;
+  /** 计入限流的时间：跟随条目被判 invalid 时退回 */
+  rateAt?: number;
 }
 
 /** 缓冲里的普通消息：只存文字和附件引用，不落盘、不下载 */
@@ -355,6 +365,10 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
   /** 每个群、每个发送者最近一次开始投递的反馈条目（R5） */
   const recent = new Map<number, Map<number, { outcome: { cardId?: number }; at: number }>>();
   const rate = new Map<number, number[]>();
+  /** 连续对话窗口（F1）：群 → 成员 → 到期时间（本机时间）与机器人回复所属的卡片；只在内存里 */
+  const follows = new Map<number, Map<number, { until: number; cardId: number }>>();
+  /** 已开始投递的消息（`群:消息 id`，按插入顺序保留最近 DELIVERED_MAX 条） */
+  const deliveredIds = new Set<string>();
   /** 每人上一次收到限流提示的消息时间；一个限流窗口内只提示一次 */
   const rateNoticed = new Map<number, number>();
   const dutyRounds = new Map<string, DutyRound>();
@@ -392,9 +406,33 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     queues.delete(chatId);
     buffers.delete(chatId);
     recent.delete(chatId);
+    follows.delete(chatId);
   };
 
-  /** 丢掉超过 60 秒的缓冲与 R5 记录（缓冲按消息时间，R5 按本机时间） */
+  /** 机器人在群里回复了成员：打开或续上连续对话窗口（F1） */
+  const openFollow = (chatId: number, fromId: number, cardId: number) => {
+    if (data.followMinutes <= 0) return;
+    const windows = follows.get(chatId) ?? new Map<number, { until: number; cardId: number }>();
+    windows.set(fromId, { until: now() + data.followMinutes * 60_000, cardId });
+    follows.set(chatId, windows);
+  };
+
+  /** 跟随条目被判 invalid：退回它占用的限流次数 */
+  const refundRate = (item: QueuedItem) => {
+    const list = rate.get(item.fromId);
+    const at = item.rateAt === undefined ? -1 : (list?.lastIndexOf(item.rateAt) ?? -1);
+    if (at >= 0) list?.splice(at, 1);
+  };
+
+  const markDelivered = (chatId: number, ids: readonly number[]) => {
+    for (const id of ids) deliveredIds.add(`${chatId}:${id}`);
+    for (const key of deliveredIds) {
+      if (deliveredIds.size <= DELIVERED_MAX) break;
+      deliveredIds.delete(key);
+    }
+  };
+
+  /** 丢掉超过 60 秒的缓冲与 R5 记录（缓冲按消息时间，R5 按本机时间）和到期的连续对话窗口 */
   const pruneContext = (chatId: number, messageTime: number) => {
     const senders = buffers.get(chatId);
     for (const [fromId, list] of senders ?? []) {
@@ -408,6 +446,11 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       if (now() - record.at > CONTEXT_WINDOW_MS) records?.delete(fromId);
     }
     if (records?.size === 0) recent.delete(chatId);
+    const windows = follows.get(chatId);
+    for (const [fromId, window] of windows ?? []) {
+      if (now() >= window.until) windows?.delete(fromId);
+    }
+    if (windows?.size === 0) follows.delete(chatId);
   };
 
   const bufferMessage = (chatId: number, fromId: number, entry: BufferedMessage) => {
@@ -802,6 +845,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
         const records = recent.get(chatId) ?? new Map();
         records.set(item.fromId, { outcome: item.outcome, at: now() });
         recent.set(chatId, records);
+        markDelivered(chatId, item.messageIds);
       }
       if (!item.downloaded) {
         const token = data.token;
@@ -839,6 +883,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
         groupTitle: group.title,
         ...(otherProjects.length > 0 ? { otherProjects } : {}),
         ...(item.forward ? { forwardedFrom: item.forward.from } : {}),
+        ...(item.follow ? { follow: data.followMinutes } : {}),
         ...(card
           ? {
               card: {
@@ -973,7 +1018,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       queues.set(to, queue);
     }
     for (const item of inflight.values()) if (item.chatId === from) item.chatId = to;
-    for (const map of [buffers, recent] as Map<number, unknown>[]) {
+    for (const map of [buffers, recent, follows] as Map<number, unknown>[]) {
       const entry = map.get(from);
       map.delete(from);
       if (entry) map.set(to, entry);
@@ -1101,8 +1146,10 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
         : attachments
           ? '（该用户在 @ 后发的附件已并入本条）'
           : '';
-    const limited = () => {
+    /** silent：跟随来的消息超出限流时静默丢弃，不提示 */
+    const limited = (silent = false) => {
       if (!rateLimited(from.id, time)) return false;
+      if (silent) return true;
       const noticed = rateNoticed.get(from.id);
       if (noticed === undefined || time - noticed > HOUR_MS) {
         rateNoticed.set(from.id, time);
@@ -1146,6 +1193,10 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       return;
     }
 
+    // F2：连续对话窗口（followMinutes 为 0 时不生效）
+    const window = data.followMinutes > 0 ? follows.get(chat.id)?.get(from.id) : undefined;
+    const windowOpen = window !== undefined && now() < window.until;
+    let follow = false;
     if (body === null) {
       // 普通消息
       if (
@@ -1157,8 +1208,23 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
         mergeInto(open, after(caption));
         return;
       }
+      // 窗口内这个人自己的消息：没 @ 别人、没引用别人、有文字或附件才跟随，按回复那张卡片路由
+      const followCard = windowOpen ? cardById(window.cardId) : undefined;
+      if (
+        followCard &&
+        (caption || attachments) &&
+        !mentionsOthers(text, entities, bot) &&
+        (!quoted || quoted.fromBot || quoted.fromId === from.id)
+      ) {
+        follow = true;
+        body = caption;
+        target = routeOf(followCard);
+      }
+    }
+    if (body === null) {
       const source = recent.get(chat.id)?.get(from.id);
-      if (!open && attachments && source && now() - source.at <= CONTEXT_WINDOW_MS) {
+      // 窗口打开期间 R5 由跟随规则覆盖
+      if (!windowOpen && !open && attachments && source && now() - source.at <= CONTEXT_WINDOW_MS) {
         // R5：反馈投递后 60 秒内补发的附件，按回复该卡片处理；计入限流
         if (limited()) return;
         const item = newItem([`${SUPPLEMENT_TEXT}${caption}`.slice(0, ITEM_TEXT_MAX)]);
@@ -1180,21 +1246,31 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       return;
     }
 
-    if (limited()) return;
+    // 跟随的消息并入已有条目时不计限流（同 Q3），只在新建条目时计
+    if (!follow && limited()) return;
     if (
       open &&
       !open.awaiting &&
-      open.cardId === target.cardId &&
-      open.contextCardId === target.contextCardId &&
-      time - open.lastDate <= DEBOUNCE_MS
+      ((open.cardId === target.cardId &&
+        open.contextCardId === target.contextCardId &&
+        time - open.lastDate <= DEBOUNCE_MS) ||
+        // 跟随条目还在等待时又 @ 了机器人：并进去（Q3）
+        (open.follow &&
+          !follow &&
+          target.cardId === undefined &&
+          target.contextCardId === undefined &&
+          now() < open.readyAt))
     ) {
-      // 同一人 3 秒内连续发的合成一条
+      // 同一人 3 秒内连续发的合成一条；并进了不是跟随的消息，整条不再算跟随
+      if (!follow) delete open.follow;
       mergeInto(open, body || (attachments ? ATTACHMENT_ONLY_TEXT : ''));
       return;
     }
+    if (follow && limited(true)) return;
 
     // R2 / Q2：并入同一人前 60 秒内缓冲的全部普通消息——附件一律并入，文字按时间顺序带上（被引用的那条除外）
     const item = Object.assign(newItem([]), target);
+    if (follow) Object.assign(item, { follow: true, rateAt: time });
     const used = bufferedBefore(chat.id, from.id, time)
       .filter((m) => quoted?.messageId === undefined || m.messageId !== quoted.messageId)
       .sort((a, b) => a.date - b.date || a.messageId - b.messageId);
@@ -1228,9 +1304,57 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     enqueue(item);
   };
 
+  /**
+   * TG-E：编辑后的消息。还没作为反馈投递或排队、编辑后 @ 了机器人或是 /bug 的，当作一条新消息处理；其余忽略。
+   */
+  const handleEdit = (raw: unknown) => {
+    const record = asRecord(raw);
+    const chat = asRecord(record?.chat);
+    const bot = data.bot;
+    if (
+      !record ||
+      !bot ||
+      typeof chat?.id !== 'number' ||
+      !isGroupChat(chat as unknown as TgChat) ||
+      typeof record.message_id !== 'number' ||
+      typeof record.date !== 'number' ||
+      typeof asRecord(record.from)?.id !== 'number'
+    ) {
+      return;
+    }
+    const message = record as unknown as TgMessage;
+    const chatId = message.chat.id;
+    const id = message.message_id;
+    const fromId = (message.from as { id: number }).id;
+    const handled =
+      deliveredIds.has(`${chatId}:${id}`) ||
+      (queues.get(chatId) ?? []).some((item) => item.messageIds.includes(id)) ||
+      [...inflight.values()].some((item) => item.chatId === chatId && item.messageIds.includes(id)) ||
+      data.cards.some((card) => card.chatId === chatId && card.messageId === id);
+    if (handled) return;
+    const rawText = message.text ?? message.caption;
+    const text = typeof rawText === 'string' ? rawText : '';
+    const entities = message.entities ?? message.caption_entities;
+    if (
+      parseBugCommand(text, bot.username) === null &&
+      parseBotMention(text, entities, bot.username) === null
+    ) {
+      return;
+    }
+    // 去掉缓冲里的旧版本，免得再作为「@ 前的消息」重复出现
+    const old = (buffers.get(chatId)?.get(fromId) ?? []).filter((m) => m.messageId === id);
+    if (old.length > 0) unbuffer(chatId, fromId, old);
+    const editDate = record.edit_date;
+    handleMessage({ ...message, date: typeof editDate === 'number' ? editDate : message.date });
+  };
+
   const handleUpdate = (update: TgUpdate) => {
     if (update.message) {
       handleMessage(update.message);
+      return;
+    }
+    if (update.edited_message !== undefined) {
+      handleEdit(update.edited_message);
       return;
     }
     const member = update.my_chat_member;
@@ -1370,6 +1494,11 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     const report = parseTriageInput(input);
     if (typeof report === 'string') return { ok: false, error: report };
     item.reported = true;
+    if (item.follow && report.kind === 'invalid') {
+      // F3：跟随来的消息明显不是对机器人说的：不发消息、不建卡片、不续窗口，退回限流次数
+      refundRate(item);
+      return { ok: true };
+    }
     if (report.project !== undefined && !item.forward && item.cardId === undefined) {
       // 分诊判断属于本群另一个项目：这次不回复，把同一条反馈原样转过去（匹配不上就照常处理）
       const labels = projectLabels(group, await api.workspaces.list());
@@ -1424,12 +1553,15 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     const replyTo = item.replyTo;
     // 核心拒收的附件 AI 看不到：由插件接在回复末尾，仍是一次 @ 一次回复
     if (item.lateRejected) report.reply = `${report.reply}\n\n${item.lateRejected}`;
+    /** 发了分诊回复（含追问）：打开或续上连续对话窗口；固定模板不算 */
+    let replied = true;
     try {
       const followUp = report.needInfo || (report.kind === 'bug' && !report.evidence);
       if (followUp) {
         if (card.followUps >= MAX_FOLLOW_UPS) {
           card.status = 'unconfirmed';
           delete card.askedAt;
+          replied = false;
           await sendToGroup(card, TEMPLATES.closing, replyTo);
         } else {
           card.followUps += 1;
@@ -1459,6 +1591,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     } catch (error) {
       warn(`处理 triage_report 失败（卡片 #${card.id}）：${errorMessage(error)}`);
     }
+    if (replied) openFollow(group.chatId, item.fromId, card.id);
     commit();
     if (card.status === 'fixing') void pumpDuty(card.workspaceId);
     return { ok: true };
@@ -1660,7 +1793,8 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     const item = inflight.get(sessionId);
     if (item) {
       inflight.delete(sessionId);
-      if (owner && !item.reported) recordUnreported(item);
+      // 跟随条目没调用 triage_report：不发兜底模板，直接丢弃
+      if (owner && !item.reported && !item.follow) recordUnreported(item);
       // 这条反馈在这里结束（没有转交）：删掉它的附件
       if (!item.forwarded) discardFiles([item]);
     }
@@ -1727,6 +1861,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       updatedAt: card.updatedAt,
     })),
     rateLimitPerHour: data.rateLimitPerHour,
+    followMinutes: data.followMinutes,
     ...(data.triageModel ? { triageModel: { ...data.triageModel } } : {}),
     ...(data.dutyModel ? { dutyModel: { ...data.dutyModel } } : {}),
     modelFallback,
@@ -1790,7 +1925,9 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       await pumpDuty(workspaceId);
     }
     // 没人再说话的群：缓冲也要过期即删
-    for (const chatId of new Set([...buffers.keys(), ...recent.keys()])) pruneContext(chatId, now());
+    for (const chatId of new Set([...buffers.keys(), ...recent.keys(), ...follows.keys()])) {
+      pruneContext(chatId, now());
+    }
     for (const chatId of queues.keys()) void pumpChat(chatId);
   }
 
@@ -1842,6 +1979,7 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
       for (const queue of queues.values()) discardFiles(queue);
       buffers.clear();
       recent.clear();
+      follows.clear();
       for (const off of unsubscribes.splice(0)) off();
       await stopPolling();
       await lastWrite;
@@ -2004,6 +2142,14 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     async setRateLimit(perHour) {
       if (!isTelegramRateLimit(perHour)) return { ok: false, error: '限额需为 1–1000 的整数' };
       data.rateLimitPerHour = perHour;
+      const saved = await saveOrError();
+      if (saved.ok) emit();
+      return saved;
+    },
+    async setFollowMinutes(minutes) {
+      if (!isFollowMinutes(minutes)) return { ok: false, error: '连续对话需为 0–60 的整数' };
+      data.followMinutes = minutes;
+      if (minutes === 0) follows.clear();
       const saved = await saveOrError();
       if (saved.ok) emit();
       return saved;

@@ -17,6 +17,12 @@ export function isTelegramRateLimit(value) {
         value >= 1 &&
         value <= TELEGRAM_RATE_LIMIT_MAX);
 }
+/** 连续对话分钟数：默认 5，可配 0–60，0 表示关闭 */
+export const FOLLOW_MINUTES_DEFAULT = 5;
+export const FOLLOW_MINUTES_MAX = 60;
+export function isFollowMinutes(value) {
+    return (Number.isSafeInteger(value) && value >= 0 && value <= FOLLOW_MINUTES_MAX);
+}
 /** token 只给首尾几位：`123456:AB…yz`。 */
 export function maskTelegramToken(token) {
     const colon = token.indexOf(':');

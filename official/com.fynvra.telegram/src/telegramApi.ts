@@ -101,6 +101,8 @@ export interface TgChatMemberUpdated {
 export interface TgUpdate {
   update_id: number;
   message?: TgMessage;
+  /** 编辑后的消息（外部数据，用前收窄） */
+  edited_message?: unknown;
   my_chat_member?: TgChatMemberUpdated;
 }
 
@@ -228,7 +230,7 @@ export function createTelegramApi(options: TelegramApiOptions): TelegramApi {
         {
           offset,
           timeout: LONG_POLL_TIMEOUT_SEC,
-          allowed_updates: ['message', 'my_chat_member'],
+          allowed_updates: ['message', 'edited_message', 'my_chat_member'],
         },
         signal,
         (LONG_POLL_TIMEOUT_SEC + 15) * 1000

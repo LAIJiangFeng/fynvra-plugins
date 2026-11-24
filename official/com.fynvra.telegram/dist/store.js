@@ -1,4 +1,4 @@
-import { isTelegramRateLimit, isThinkingLevel, TELEGRAM_RATE_LIMIT_DEFAULT, } from './model.js';
+import { FOLLOW_MINUTES_DEFAULT, isFollowMinutes, isTelegramRateLimit, isThinkingLevel, TELEGRAM_RATE_LIMIT_DEFAULT, } from './model.js';
 import { TELEGRAM_TOKEN_PATTERN } from './telegramApi.js';
 import { asRecord } from './util.js';
 export const MAX_CANDIDATES = 20;
@@ -15,6 +15,7 @@ export function emptyTelegramData() {
         cards: [],
         pollOffset: 0,
         rateLimitPerHour: TELEGRAM_RATE_LIMIT_DEFAULT,
+        followMinutes: FOLLOW_MINUTES_DEFAULT,
         legacyMigrated: false,
     };
 }
@@ -195,6 +196,8 @@ export function parseTelegramData(raw) {
         data.pollOffset = r.pollOffset;
     if (isTelegramRateLimit(r.rateLimitPerHour))
         data.rateLimitPerHour = r.rateLimitPerHour;
+    if (isFollowMinutes(r.followMinutes))
+        data.followMinutes = r.followMinutes;
     data.legacyMigrated = r.legacyMigrated === true;
     const triageModel = parseModelRef(r.triageModel);
     if (triageModel)

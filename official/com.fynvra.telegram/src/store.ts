@@ -3,6 +3,8 @@
 // 字段非法时只丢弃那个字段或那条记录。
 import type { ChannelModelRef, FynvraPluginApi } from './types/appPluginApi.js';
 import {
+  FOLLOW_MINUTES_DEFAULT,
+  isFollowMinutes,
   isTelegramRateLimit,
   isThinkingLevel,
   TELEGRAM_RATE_LIMIT_DEFAULT,
@@ -89,6 +91,8 @@ export interface TelegramData {
   pollOffset: number;
   /** 每人每小时最多处理几条（1–1000） */
   rateLimitPerHour: number;
+  /** 连续对话的分钟数（0–60，0 关闭）；旧数据没有时按默认 */
+  followMinutes: number;
   /** 旧 telegram.json 已经处理过（迁移成功或没有旧数据） */
   legacyMigrated: boolean;
   /** 分诊 / 值班会话用的模型；缺省为默认 */
@@ -104,6 +108,7 @@ export function emptyTelegramData(): TelegramData {
     cards: [],
     pollOffset: 0,
     rateLimitPerHour: TELEGRAM_RATE_LIMIT_DEFAULT,
+    followMinutes: FOLLOW_MINUTES_DEFAULT,
     legacyMigrated: false,
   };
 }
@@ -276,6 +281,7 @@ export function parseTelegramData(raw: unknown): TelegramData {
     .slice(-MAX_CARDS);
   if (isNonNegative(r.pollOffset)) data.pollOffset = r.pollOffset;
   if (isTelegramRateLimit(r.rateLimitPerHour)) data.rateLimitPerHour = r.rateLimitPerHour;
+  if (isFollowMinutes(r.followMinutes)) data.followMinutes = r.followMinutes;
   data.legacyMigrated = r.legacyMigrated === true;
   const triageModel = parseModelRef(r.triageModel);
   if (triageModel) data.triageModel = triageModel;

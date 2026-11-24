@@ -100,7 +100,7 @@ export function createTelegramApi(options) {
             const result = await call(token, 'getUpdates', {
                 offset,
                 timeout: LONG_POLL_TIMEOUT_SEC,
-                allowed_updates: ['message', 'my_chat_member'],
+                allowed_updates: ['message', 'edited_message', 'my_chat_member'],
             }, signal, (LONG_POLL_TIMEOUT_SEC + 15) * 1000);
             if (!Array.isArray(result))
                 throw new TelegramApiError('api', 'getUpdates: unexpected response');
