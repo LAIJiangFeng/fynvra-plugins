@@ -2,9 +2,10 @@
 // 长连接收事件、会话发现与准入、分诊投递、triage_report 处理、追问、值班投递、卡片与任务关联、PR 结果通知。
 // 会话里只会收到经 api.channel.filterOutbound 过滤后的 triage 回复与固定模板。
 // shortcut: 引擎复制自 Telegram 插件，两边分别维护；出现第三个渠道或两边修复开始分叉时再抽公共模块
+import { randomBytes } from 'node:crypto';
 import { chatFallbackTitle, isFollowMinutes, isRateLimit, maskSecret, } from './model.js';
 import { cleanupStaleAttachments, downloadAttachments, mergeAttachments, rejectionSummary, removeFiles, } from './attachments.js';
-import { dutyPrompt, MAX_FOLLOW_UPS, parseAssessment, parseTriageInput, pullRequestSection, pullRequestSource, TEMPLATES, triagePrompt, } from './content.js';
+import { bindCodeOf, decisionOf, dutyPrompt, MAX_FOLLOW_UPS, parseAssessment, parseTriageInput, pullRequestSection, pullRequestSource, TEMPLATES, triagePrompt, } from './content.js';
 import { APP_ID_PATTERN, APP_SECRET_PATTERN, FeishuApiError, redactSecrets, } from './feishuApi.js';
 import { parseMessage } from './message.js';
 import { fitBytes, forwardRecord, joinBody, MAX_GATHER_MS, memberLabel, READ_TIMEOUT_MS, readFailure, renderBody, } from './reading.js';
@@ -31,6 +32,10 @@ const BUFFER_PER_SENDER = 10;
 const BUFFER_SENDERS_PER_GROUP = 200;
 /** 去重：记住最近处理过的消息 id 的条数（长连接可能重推同一事件） */
 const SEEN_MESSAGES_MAX = 1_000;
+/** 绑定码有效期 */
+export const BIND_CODE_TTL_MS = 10 * 60_000;
+/** 维护者没引用卡片说「确认」时，只看这段时间内更新过的待确认卡片 */
+const DECISION_WINDOW_MS = 24 * 60 * 60_000;
 /** 还在分诊阶段、回复它就是对这张卡片的追问回复的状态；其余状态的卡片被回复时按新反馈处理 */
 const RETRIAGE_STATUSES = new Set([
     'asking',
@@ -137,6 +142,18 @@ export function createFeishuService(deps) {
     const pendingModel = new Set();
     /** 所选模型不可用、已改用默认（设置页提示用） */
     let modelFallback = false;
+    /** 维护者绑定码：只在内存里，绑定成功或过期后作废 */
+    let bindCode;
+    /** 绑定码到期时重画设置页 */
+    let bindTimer;
+    const validBindCode = () => (bindCode && now() < bindCode.expiresAt ? bindCode.code : undefined);
+    const clearBindCode = () => {
+        bindCode = undefined;
+        clearTimeout(bindTimer);
+        bindTimer = undefined;
+    };
+    /** 按飞书服务器填写的 open_id 识别维护者 */
+    const isMaintainer = (openId) => data.maintainer?.openId === openId;
     const safe = (text) => redactSecrets(text, [data.appSecret]);
     const creds = () => data.appId && data.appSecret ? { appId: data.appId, appSecret: data.appSecret } : undefined;
     const warn = (message) => api.log('warn', safe(message));
@@ -628,6 +645,7 @@ export function createFeishuService(deps) {
                 ...(otherProjects.length > 0 ? { otherProjects } : {}),
                 ...(item.forward ? { forwardedFrom: item.forward.from } : {}),
                 ...(item.follow ? { followMinutes: item.follow.minutes } : {}),
+                ...(isMaintainer(item.fromId) ? { fromMaintainer: true } : {}),
                 ...(card
                     ? {
                         card: {
@@ -701,6 +719,14 @@ export function createFeishuService(deps) {
             pumping.delete(chatId);
         }
     };
+    /** 采纳需求（设置页「采纳」与维护者一句话确认共用）：排进值班 */
+    function approveCard(card) {
+        card.updatedAt = now();
+        card.status = 'fixing';
+        card.duty = 'queued';
+        commit();
+        void pumpDuty(card.workspaceId);
+    }
     const nextCardId = () => data.cards.reduce((max, card) => Math.max(max, card.id), 0) + 1;
     const addCard = (card) => {
         data.cards.push(card);
@@ -868,6 +894,29 @@ export function createFeishuService(deps) {
     /** 机器人发过的消息（判断「回复机器人」） */
     const isBotMessage = (id) => id !== undefined &&
         (data.botMessageIds.includes(id) || data.cards.some((c) => c.botMessageIds.includes(id)));
+    /** M1：私聊发来「绑定 <码>」且码有效：绑定发送者为维护者；返回是否已处理 */
+    const tryBind = (event, botOpenId) => {
+        const code = validBindCode();
+        if (!code || bindCodeOf(parseMessage(event, botOpenId)?.text ?? '') !== code)
+            return false;
+        clearBindCode();
+        const openId = event.senderOpenId;
+        data.maintainer = { openId, label: memberLabel(openId), boundAt: now() };
+        notify('飞书维护者已绑定', `已绑定维护者：${data.maintainer.label}`);
+        commit();
+        // 未允许的私聊也要回复：不走 replyTo 的会话检查
+        const c = creds();
+        if (c) {
+            deps.feishu
+                .reply(c, event.messageId, TEMPLATES.bound)
+                .then((sent) => {
+                data.botMessageIds = [...data.botMessageIds, sent.messageId].slice(-MAX_BOT_MESSAGES);
+                commit();
+            })
+                .catch((error) => warn(`发送绑定回复失败：${errorMessage(error)}`));
+        }
+        return true;
+    };
     const handleMessage = (event) => {
         if (event.senderType !== 'user')
             return; // 机器人和应用发的消息不处理
@@ -885,6 +934,9 @@ export function createFeishuService(deps) {
             return;
         const chatId = event.chatId;
         const p2p = event.chatType === 'p2p';
+        // M1：私聊里的绑定消息（不管这个私聊有没有允许）；码无效时按原流程处理
+        if (p2p && tryBind(event, bot.openId))
+            return;
         const group = groupOf(chatId);
         if (!group) {
             // 没允许的会话：只记为候选，消息丢弃、不回复
@@ -947,6 +999,40 @@ export function createFeishuService(deps) {
             !text.includes('@所有人') &&
             event.parentId === undefined &&
             (attachments || caption !== '' || forward);
+        // M3：维护者一句话确认或取消待确认的需求；他还有没投递的条目时按原流程合并
+        if (!open && isMaintainer(fromId)) {
+            const window = p2p ? undefined : followOf(chatId, fromId);
+            const addressed = repliedId !== undefined || window !== undefined || parsed.mentioned || p2p;
+            const decision = addressed ? decisionOf(text) : undefined;
+            if (decision) {
+                const routed = target.cardId ?? target.contextCardId ?? (body === null ? window?.cardId : undefined);
+                const card = routed !== undefined
+                    ? cardById(routed)
+                    : data.cards
+                        .filter((c) => c.chatId === chatId &&
+                        c.status === 'pending-approval' &&
+                        now() - c.updatedAt <= DECISION_WINDOW_MS)
+                        .reduce((a, c) => (a && a.updatedAt >= c.updatedAt ? a : c), undefined);
+                if (card?.kind === 'feature' &&
+                    (card.status === 'pending-approval' || card.status === 'declined')) {
+                    // 马上处理：不交给分诊、不计限流、不新建卡片
+                    if (decision === 'approve')
+                        approveCard(card);
+                    else {
+                        card.status = 'rejected';
+                        card.updatedAt = now();
+                    }
+                    const reply = decision === 'approve'
+                        ? TEMPLATES.maintainerApproved(card.id)
+                        : TEMPLATES.maintainerRejected(card.id);
+                    void sendToGroup(card, reply, messageId).then(commit);
+                    if (!p2p)
+                        openFollow(chatId, fromId, card.id);
+                    commit();
+                    return;
+                }
+            }
+        }
         /** 这条消息给条目贡献的内容（引用和话题在投递前读） */
         const partOf = (content) => ({
             messageId,
@@ -1410,10 +1496,21 @@ export function createFeishuService(deps) {
             }
             else if (report.kind === 'feature') {
                 const verdict = parseAssessment(report.assessment);
-                card.status = verdict === 'fail' ? 'declined' : 'pending-approval';
+                // M2：维护者提的需求评估通过就直接采纳；有顾虑时等他一句话确认（不记为 declined）
+                const byMaintainer = isMaintainer(item.fromId);
                 if (verdict === 'incomplete')
                     card.assessmentIncomplete = true;
-                await sendTriageReply(card, report.reply, replyTo);
+                if (byMaintainer && verdict === 'pass') {
+                    card.status = 'fixing';
+                    card.duty = 'queued';
+                }
+                else {
+                    card.status = verdict === 'fail' && !byMaintainer ? 'declined' : 'pending-approval';
+                }
+                const reply = byMaintainer && verdict !== 'pass' && !report.reply.includes('确认')
+                    ? `${report.reply}\n${TEMPLATES.confirmHint}`
+                    : report.reply;
+                await sendTriageReply(card, reply, replyTo);
                 if (card.status === 'pending-approval') {
                     notify('飞书新的待确认需求', `卡片 #${card.id}：${card.title}${verdict === 'incomplete' ? '（评估格式不完整）' : ''}`);
                 }
@@ -1682,6 +1779,8 @@ export function createFeishuService(deps) {
         ...(data.triageModel ? { triageModel: { ...data.triageModel } } : {}),
         ...(data.dutyModel ? { dutyModel: { ...data.dutyModel } } : {}),
         modelFallback,
+        ...(data.maintainer ? { maintainer: { label: data.maintainer.label } } : {}),
+        ...(bindCode && now() < bindCode.expiresAt ? { bindCode: bindCode.code } : {}),
     });
     /** 设置页改动：落盘成功后通知重画 */
     const commitOrError = async () => {
@@ -1783,6 +1882,7 @@ export function createFeishuService(deps) {
         },
         async stop() {
             stopped = true;
+            clearBindCode();
             clearInterval(maintenanceTimer);
             maintenanceTimer = undefined;
             for (const timer of [...chatTimers.values(), ...prChecks.values()])
@@ -1968,18 +2068,30 @@ export function createFeishuService(deps) {
             if (card?.status !== 'pending-approval') {
                 return { ok: false, error: '只能处理待确认的需求' };
             }
-            card.updatedAt = now();
             if (action === 'approve') {
-                card.status = 'fixing';
-                card.duty = 'queued';
-                commit();
-                void pumpDuty(card.workspaceId);
+                approveCard(card);
                 return { ok: true };
             }
+            card.updatedAt = now();
             card.status = 'rejected';
             await sendToGroup(card, TEMPLATES.rejected, card.messageId);
             commit();
             return { ok: true };
+        },
+        async createBindCode() {
+            clearBindCode();
+            bindCode = { code: randomBytes(12).toString('base64url'), expiresAt: now() + BIND_CODE_TTL_MS };
+            bindTimer = setTimeout(() => {
+                clearBindCode();
+                emit();
+            }, BIND_CODE_TTL_MS);
+            bindTimer.unref?.();
+            emit();
+            return { ok: true };
+        },
+        async unbindMaintainer() {
+            delete data.maintainer;
+            return commitOrError();
         },
         async setRateLimit(perHour) {
             if (!isRateLimit(perHour))

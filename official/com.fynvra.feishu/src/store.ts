@@ -104,6 +104,8 @@ export interface FeishuData {
   /** 分诊 / 值班会话用的模型；缺省为默认 */
   triageModel?: ChannelModelRef;
   dutyModel?: ChannelModelRef;
+  /** 绑定的维护者：飞书服务器填写的发送者 open_id（本应用下），只能绑定一个人 */
+  maintainer?: { openId: string; label: string; boundAt: number };
 }
 
 export function emptyFeishuData(): FeishuData {
@@ -278,6 +280,19 @@ export function parseFeishuData(raw: unknown): FeishuData {
   if (triageModel) data.triageModel = triageModel;
   const dutyModel = parseModelRef(r.dutyModel);
   if (dutyModel) data.dutyModel = dutyModel;
+  const maintainer = asRecord(r.maintainer);
+  if (
+    maintainer &&
+    isFeishuId(maintainer.openId) &&
+    typeof maintainer.label === 'string' &&
+    isNonNegative(maintainer.boundAt)
+  ) {
+    data.maintainer = {
+      openId: maintainer.openId,
+      label: maintainer.label.slice(0, 64),
+      boundAt: maintainer.boundAt,
+    };
+  }
   return data;
 }
 

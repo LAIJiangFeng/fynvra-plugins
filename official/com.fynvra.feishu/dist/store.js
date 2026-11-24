@@ -193,6 +193,17 @@ export function parseFeishuData(raw) {
     const dutyModel = parseModelRef(r.dutyModel);
     if (dutyModel)
         data.dutyModel = dutyModel;
+    const maintainer = asRecord(r.maintainer);
+    if (maintainer &&
+        isFeishuId(maintainer.openId) &&
+        typeof maintainer.label === 'string' &&
+        isNonNegative(maintainer.boundAt)) {
+        data.maintainer = {
+            openId: maintainer.openId,
+            label: maintainer.label.slice(0, 64),
+            boundAt: maintainer.boundAt,
+        };
+    }
     return data;
 }
 export function createFeishuStore(api) {

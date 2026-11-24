@@ -123,6 +123,10 @@ export interface FeishuStateView {
   dutyModel?: ChannelModelRef;
   /** 带所选模型建会话或换模型失败过（已改用默认）；用户改选后清除 */
   modelFallback: boolean;
+  /** 已绑定的维护者（只给显示用的 label） */
+  maintainer?: { label: string };
+  /** 还有效的绑定码（只在内存里） */
+  bindCode?: string;
 }
 
 /** 每人每小时限额：默认 5，可配 1–1000 */

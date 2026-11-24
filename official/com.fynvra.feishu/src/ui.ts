@@ -47,6 +47,8 @@ export const ACTIONS = {
   dutyThinking: 'thinking.duty',
   approve: 'card.approve',
   reject: 'card.reject',
+  bindCode: 'maintainer.code',
+  unbind: 'maintainer.unbind',
 } as const;
 
 const CONNECTION_TEXT: Record<FeishuConnection, string> = {
@@ -290,6 +292,33 @@ export function buildSettingsUi(
   }
   connection.push({ type: 'text', text: '需要的权限和事件见使用说明', tone: 'muted' });
 
+  const maintainer: UiNode[] = [
+    {
+      type: 'keyValue',
+      items: [{ label: '维护者', value: state.maintainer ? clip(state.maintainer.label, 200) : '未绑定' }],
+    },
+    { type: 'button', label: '生成绑定码', action: ACTIONS.bindCode },
+  ];
+  if (state.bindCode) {
+    maintainer.push(
+      {
+        type: 'text',
+        text: '用要绑定的飞书账号私聊机器人，发送：绑定 <码>（10 分钟内有效）',
+        tone: 'muted',
+      },
+      { type: 'text', text: state.bindCode }
+    );
+  }
+  if (state.maintainer) {
+    maintainer.push({
+      type: 'button',
+      label: '解除绑定',
+      action: ACTIONS.unbind,
+      tone: 'destructive',
+      confirm: '解除后，机器人不再把这个账号当作维护者。确定解除绑定？',
+    });
+  }
+
   const typeBadge = (type: FeishuChatType) => ({ text: CHAT_TYPE_TEXT[type], tone: 'muted' as const });
 
   const candidates: UiListItem[] = state.candidates.map((candidate) => ({
@@ -424,6 +453,7 @@ export function buildSettingsUi(
   return {
     children: [
       { type: 'section', title: '连接', children: connection },
+      { type: 'section', title: '维护者', children: maintainer },
       {
         type: 'section',
         title: '会话',
@@ -627,6 +657,10 @@ export async function handleUiAction(
       if (cardId === null) return { ok: false, error: '只能处理待确认的需求' };
       return service.resolveCard(cardId, action === ACTIONS.approve ? 'approve' : 'reject');
     }
+    case ACTIONS.bindCode:
+      return service.createBindCode();
+    case ACTIONS.unbind:
+      return service.unbindMaintainer();
     default:
       return { ok: false, error: `未知操作：${String(action)}` };
   }
