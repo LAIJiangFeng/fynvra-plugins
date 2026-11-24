@@ -44,6 +44,8 @@ export interface TriageItemInput {
   otherProjects?: { name: string; note: string }[];
   /** 这条反馈由哪个项目的分诊转交过来 */
   forwardedFrom?: string;
+  /** 连续对话跟随来的消息：窗口的分钟数；缺省表示不是跟随条目 */
+  followMinutes?: number;
 }
 
 const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim();
@@ -80,6 +82,11 @@ export function triagePrompt(item: TriageItemInput): string {
     `已追问 ${rounds}/${MAX_FOLLOW_UPS} 轮`,
     '本条目调用 triage_report 恰好一次（call triage_report exactly once for this item）。',
     'title、summary、evidence 不要写群成员的名字或昵称，用「群成员」或「用户」代替；也不要复述截图或附件里的链接、凭证、个人信息。',
+    ...(item.followMinutes !== undefined
+      ? [
+          `这条消息没有 @ 你，也没有回复你的消息，是该成员在你回复他之后 ${item.followMinutes} 分钟内发的：可能是在继续和你对话，也可能是在和群里别人说话。如果明显不是对你说的，triage_report 的 kind 填 invalid，这次的 reply 不会发到群里；如果是在和你对话，照常处理并回复。`,
+        ]
+      : []),
     ...(item.forwardedFrom
       ? [
           `这条反馈由「${oneLine(item.forwardedFrom)}」的分诊判断属于本项目，请直接在本项目处理，不要再填 project。`,

@@ -9,6 +9,7 @@ import {
   type FeishuChatType,
   type FeishuConnection,
   type FeishuStateView,
+  isFollowMinutes,
   isRateLimit,
   maskSecret,
 } from './model.js';
@@ -149,6 +150,8 @@ export interface FeishuService {
   resolveCard(cardId: number, action: FeishuCardAction): Promise<ActionResult>;
   /** 每人每小时限额（1–1000），落盘后立即生效 */
   setRateLimit(perHour: number): Promise<ActionResult>;
+  /** 连续对话分钟数（0–60，0 关闭），落盘后立即生效 */
+  setFollowMinutes(minutes: number): Promise<ActionResult>;
   /** 分诊 / 值班模型（null 为默认）：落盘后应用到已有会话，运行中的等下一次投递前补上 */
   setModel(kind: 'triage' | 'duty', model: ChannelModelRef | null): Promise<ActionResult>;
   onChange(listener: () => void): () => void;
@@ -196,6 +199,8 @@ interface QueuedItem {
   supplementOf?: { cardId?: number };
   /** 转交过来的条目：目标项目与转交方项目名（每条反馈最多转一次） */
   forward?: { workspaceId: string; from: string };
+  /** 连续对话跟随来的条目：窗口分钟数（提示里用）与占用的限流记录（invalid 时退回）；并进非跟随消息后去掉 */
+  follow?: { minutes: number; rateAt: number };
 }
 
 /** 缓冲里的普通消息：只存文字和附件引用，不落盘、不下载 */
@@ -330,6 +335,8 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
   const buffers = new Map<string, Map<string, BufferedMessage[]>>();
   /** 每个群、每个发送者最近一次开始投递的反馈条目（R5） */
   const recent = new Map<string, Map<string, { outcome: { cardId?: number }; at: number }>>();
+  /** 连续对话窗口：群 → 成员 → 到期时间（本机时间）与机器人回复所属卡片；只在内存里 */
+  const follows = new Map<string, Map<string, { until: number; cardId: number; minutes: number }>>();
   const rate = new Map<string, number[]>();
   /** 每人上一次收到限流提示的消息时间；一个限流窗口内只提示一次 */
   const rateNoticed = new Map<string, number>();
@@ -370,6 +377,29 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
     queues.delete(chatId);
     buffers.delete(chatId);
     recent.delete(chatId);
+    follows.delete(chatId);
+  };
+
+  /** F1：群里回复了成员，打开或续期跟随窗口；设置为 0 时不打开 */
+  const openFollow = (chatId: string, fromId: string, cardId: number) => {
+    const minutes = data.followMinutes;
+    if (minutes <= 0) return;
+    const members = follows.get(chatId) ?? new Map();
+    members.set(fromId, { until: now() + minutes * 60_000, cardId, minutes });
+    follows.set(chatId, members);
+  };
+
+  /** 有效的跟随窗口（设置改为 0 后已打开的也失效） */
+  const followOf = (chatId: string, fromId: string) => {
+    const window = follows.get(chatId)?.get(fromId);
+    return window && data.followMinutes > 0 && now() < window.until ? window : undefined;
+  };
+
+  /** 退回一次限流记录 */
+  const refundRate = (userId: string, at: number) => {
+    const list = rate.get(userId);
+    const index = list?.indexOf(at) ?? -1;
+    if (index >= 0) list?.splice(index, 1);
   };
 
   /** 丢掉超过 60 秒的缓冲与 R5 记录（缓冲按消息时间，R5 按本机时间） */
@@ -386,6 +416,11 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
       if (now() - record.at > CONTEXT_WINDOW_MS) records?.delete(fromId);
     }
     if (records?.size === 0) recent.delete(chatId);
+    const members = follows.get(chatId);
+    for (const [fromId, window] of members ?? []) {
+      if (now() >= window.until) members?.delete(fromId);
+    }
+    if (members?.size === 0) follows.delete(chatId);
   };
 
   const bufferMessage = (chatId: string, fromId: string, entry: BufferedMessage) => {
@@ -834,6 +869,7 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
         chatType: group.chatType,
         ...(otherProjects.length > 0 ? { otherProjects } : {}),
         ...(item.forward ? { forwardedFrom: item.forward.from } : {}),
+        ...(item.follow ? { followMinutes: item.follow.minutes } : {}),
         ...(card
           ? {
               card: {
@@ -912,6 +948,8 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
   const recordUnreported = (item: InflightItem) => {
     const text = item.body.head;
     warn(`分诊会话这一轮没有调用 triage_report（会话 ${item.chatId}）`);
+    // F3：跟随条目不发兜底模板，直接丢弃
+    if (item.follow) return;
     const group = groupOf(item.chatId);
     if (!group) return;
     const reply = (card: StoredCard) =>
@@ -1129,6 +1167,14 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
       if (body !== null && quotedCard) target = { contextCardId: quotedCard.id };
     }
     const caption = text;
+    // F2：群里不是反馈的消息，发送者有有效的跟随窗口、没 @ 别人（含 @所有人）、没引用别人的消息、有内容时跟随
+    const followWindow = body === null && !p2p ? followOf(chatId, fromId) : undefined;
+    const following =
+      followWindow !== undefined &&
+      event.mentions.every((m) => m.openId === bot.openId) &&
+      !text.includes('@所有人') &&
+      event.parentId === undefined &&
+      (attachments || caption !== '' || forward);
 
     /** 这条消息给条目贡献的内容（引用和话题在投递前读） */
     const partOf = (content: string): ItemPart => ({
@@ -1211,13 +1257,23 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
 
     if (body === null) {
       // 普通群消息
-      if (open && !open.awaiting && (attachments || caption || forward)) {
-        // R4 / Q3：还没投递的条目在等，同一人接着发的文字和附件一起并入
-        mergeInto(open, after(caption));
+      if (open && !open.awaiting && (attachments || caption || forward) && (!open.follow || following)) {
+        // R4 / Q3：还没投递的条目在等，同一人接着发的文字和附件一起并入；跟随条目只并入同样跟随的消息
+        mergeInto(open, open.follow ? caption : after(caption));
+        return;
+      }
+      if (following && followWindow) {
+        // F3：按回复窗口里那张卡片路由；计入限流，超出时静默丢弃
+        if (rateLimited(fromId, time)) return;
+        const card = cardById(followWindow.cardId);
+        const item = createItem(card ? routeOf(card) : {}, caption);
+        item.follow = { minutes: followWindow.minutes, rateAt: time };
+        enqueue(item);
         return;
       }
       const source = recent.get(chatId)?.get(fromId);
-      if (!open && attachments && source && now() - source.at <= CONTEXT_WINDOW_MS) {
+      // 跟随窗口打开期间 R5 由跟随规则接管
+      if (!followWindow && !open && attachments && source && now() - source.at <= CONTEXT_WINDOW_MS) {
         // R5：反馈投递后 60 秒内补发的附件，按回复该卡片处理；计入限流
         if (limited()) return;
         const item = newItem();
@@ -1241,6 +1297,17 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
 
     if (limited()) return;
     if (
+      open?.follow &&
+      !open.awaiting &&
+      ((target.cardId === undefined && target.contextCardId === undefined) ||
+        (open.cardId === target.cardId && open.contextCardId === target.contextCardId))
+    ) {
+      // F3：跟随条目还在等时又 @ 了或回复了机器人：并入同一条，整条不再算跟随
+      delete open.follow;
+      mergeInto(open, body);
+      return;
+    }
+    if (
       open &&
       !open.awaiting &&
       open.cardId === target.cardId &&
@@ -1252,33 +1319,37 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
       return;
     }
 
-    // Q2：并入同一人前 60 秒内缓冲的全部消息（文字和附件）；被引用的那条不再作为「@ 之前的消息」重复出现
-    const item = Object.assign(newItem(), target);
-    const earlier = bufferedBefore(chatId, fromId, time);
-    for (const m of earlier) {
-      if (m.messageId === event.parentId) continue;
-      addPart(item, {
-        messageId: m.messageId,
-        text: m.text,
-        files: m.hasFiles ? m.files : { refs: [], rejected: [] },
-        hasFiles: m.hasFiles,
-        pre: true,
-        ...(m.forward ? { forward: true } : {}),
-      });
+    enqueue(createItem(target, body));
+
+    /** 新条目；Q2：并入同一人前 60 秒内缓冲的全部消息（文字和附件）；被引用的那条不再作为「@ 之前的消息」重复出现 */
+    function createItem(to: { cardId?: number; contextCardId?: number }, content: string): QueuedItem {
+      const item = Object.assign(newItem(), to);
+      const earlier = bufferedBefore(chatId, fromId, time);
+      for (const m of earlier) {
+        if (m.messageId === event.parentId) continue;
+        addPart(item, {
+          messageId: m.messageId,
+          text: m.text,
+          files: m.hasFiles ? m.files : { refs: [], rejected: [] },
+          hasFiles: m.hasFiles,
+          pre: true,
+          ...(m.forward ? { forward: true } : {}),
+        });
+      }
+      unbuffer(chatId, fromId, earlier);
+      addPart(item, partOf(content));
+      const hasContent = item.parts.some(
+        (p) => p.text || p.hasFiles || p.forward || (!p.pre && p.parentId)
+      );
+      if (!hasContent) {
+        // R3：前后都没有内容，等这个人的后一条
+        item.awaiting = true;
+        item.readyAt = now() + CONTEXT_WINDOW_MS;
+      } else {
+        scheduleReady(item);
+      }
+      return item;
     }
-    unbuffer(chatId, fromId, earlier);
-    addPart(item, partOf(body));
-    const hasContent = item.parts.some(
-      (p) => p.text || p.hasFiles || p.forward || (!p.pre && p.parentId)
-    );
-    if (!hasContent) {
-      // R3：前后都没有内容，等这个人的后一条
-      item.awaiting = true;
-      item.readyAt = now() + CONTEXT_WINDOW_MS;
-    } else {
-      scheduleReady(item);
-    }
-    enqueue(item);
   };
 
   /** FS4：消息撤回。缓冲里的删掉；还没开始投递的条目去掉这条的内容，空了整条丢弃；已开始投递的不管 */
@@ -1501,6 +1572,11 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
         return { ok: true };
       }
     }
+    if (item.follow && report.kind === 'invalid') {
+      // F3：跟随来的消息不是对机器人说的：不发消息、不建卡片、不续窗口，退回限流次数
+      refundRate(item.fromId, item.follow.rateAt);
+      return { ok: true };
+    }
     const time = now();
     const [title, summary, evidence, assessment] = await Promise.all([
       clean(report.title),
@@ -1542,12 +1618,15 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
     const replyTo = item.replyTo;
     // 核心拒收的附件 AI 看不到：由插件接在回复末尾，仍是一次 @ 一次回复
     if (item.lateRejected) report.reply = `${report.reply}\n\n${item.lateRejected}`;
+    /** 这次发了分诊回复（含追问）：群里为该成员打开或续期跟随窗口 */
+    let replied = true;
     try {
       const followUp = report.needInfo || (report.kind === 'bug' && !report.evidence);
       if (followUp) {
         if (card.followUps >= MAX_FOLLOW_UPS) {
           card.status = 'unconfirmed';
           delete card.askedAt;
+          replied = false;
           await sendToGroup(card, TEMPLATES.closing, replyTo);
         } else {
           card.followUps += 1;
@@ -1577,6 +1656,7 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
     } catch (error) {
       warn(`处理 triage_report 失败（卡片 #${card.id}）：${errorMessage(error)}`);
     }
+    if (replied && group.chatType === 'group') openFollow(group.chatId, item.fromId, card.id);
     commit();
     if (card.status === 'fixing') void pumpDuty(card.workspaceId);
     return { ok: true };
@@ -1824,6 +1904,7 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
       updatedAt: card.updatedAt,
     })),
     rateLimitPerHour: data.rateLimitPerHour,
+    followMinutes: data.followMinutes,
     ...(data.triageModel ? { triageModel: { ...data.triageModel } } : {}),
     ...(data.dutyModel ? { dutyModel: { ...data.dutyModel } } : {}),
     modelFallback,
@@ -1887,7 +1968,9 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
       await pumpDuty(workspaceId);
     }
     // 没人再说话的群：缓冲也要过期即删
-    for (const chatId of new Set([...buffers.keys(), ...recent.keys()])) pruneContext(chatId, now());
+    for (const chatId of new Set([...buffers.keys(), ...recent.keys(), ...follows.keys()])) {
+      pruneContext(chatId, now());
+    }
     for (const chatId of queues.keys()) void pumpChat(chatId);
   }
 
@@ -1938,6 +2021,7 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
       for (const queue of queues.values()) discardFiles(queue);
       buffers.clear();
       recent.clear();
+      follows.clear();
       for (const off of unsubscribes.splice(0)) off();
       await stopLink();
       await lastWrite;
@@ -2106,6 +2190,13 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
     async setRateLimit(perHour) {
       if (!isRateLimit(perHour)) return { ok: false, error: '限额需为 1–1000 的整数' };
       data.rateLimitPerHour = perHour;
+      const saved = await saveOrError();
+      if (saved.ok) emit();
+      return saved;
+    },
+    async setFollowMinutes(minutes) {
+      if (!isFollowMinutes(minutes)) return { ok: false, error: '连续对话需为 0–60 的整数' };
+      data.followMinutes = minutes;
       const saved = await saveOrError();
       if (saved.ok) emit();
       return saved;

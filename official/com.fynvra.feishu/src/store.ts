@@ -6,6 +6,8 @@ import {
   type FeishuCardKind,
   type FeishuCardStatus,
   type FeishuChatType,
+  FOLLOW_MINUTES_DEFAULT,
+  isFollowMinutes,
   isRateLimit,
   isThinkingLevel,
   RATE_LIMIT_DEFAULT,
@@ -97,6 +99,8 @@ export interface FeishuData {
   botMessageIds: string[];
   /** 每人每小时最多处理几条（1–1000） */
   rateLimitPerHour: number;
+  /** 连续对话的分钟数（0–60，0 关闭）；旧数据没有时按默认 */
+  followMinutes: number;
   /** 分诊 / 值班会话用的模型；缺省为默认 */
   triageModel?: ChannelModelRef;
   dutyModel?: ChannelModelRef;
@@ -110,6 +114,7 @@ export function emptyFeishuData(): FeishuData {
     cards: [],
     botMessageIds: [],
     rateLimitPerHour: RATE_LIMIT_DEFAULT,
+    followMinutes: FOLLOW_MINUTES_DEFAULT,
   };
 }
 
@@ -268,6 +273,7 @@ export function parseFeishuData(raw: unknown): FeishuData {
     data.botMessageIds = r.botMessageIds.filter(isFeishuId).slice(-MAX_BOT_MESSAGES);
   }
   if (isRateLimit(r.rateLimitPerHour)) data.rateLimitPerHour = r.rateLimitPerHour;
+  if (isFollowMinutes(r.followMinutes)) data.followMinutes = r.followMinutes;
   const triageModel = parseModelRef(r.triageModel);
   if (triageModel) data.triageModel = triageModel;
   const dutyModel = parseModelRef(r.dutyModel);

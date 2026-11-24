@@ -20,6 +20,12 @@ export const RATE_LIMIT_MAX = 1000;
 export function isRateLimit(value) {
     return (Number.isSafeInteger(value) && value >= 1 && value <= RATE_LIMIT_MAX);
 }
+/** 连续对话分钟数：默认 5，可配 0–60，0 表示关闭 */
+export const FOLLOW_MINUTES_DEFAULT = 5;
+export const FOLLOW_MINUTES_MAX = 60;
+export function isFollowMinutes(value) {
+    return (Number.isSafeInteger(value) && value >= 0 && value <= FOLLOW_MINUTES_MAX);
+}
 /** App Secret 只给首尾各两位 */
 export function maskSecret(secret) {
     return secret.length < 8 ? '…' : `${secret.slice(0, 2)}…${secret.slice(-2)}`;

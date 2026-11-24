@@ -2,7 +2,7 @@
 // App Secret 不进 storage，放在 api.secrets 的 appSecret；App ID 不是密钥，存在 storage。
 // 字段非法时只丢弃那个字段或那条记录。
 import { APP_ID_PATTERN, APP_SECRET_PATTERN, isFeishuId } from './feishuApi.js';
-import { isRateLimit, isThinkingLevel, RATE_LIMIT_DEFAULT, } from './model.js';
+import { FOLLOW_MINUTES_DEFAULT, isFollowMinutes, isRateLimit, isThinkingLevel, RATE_LIMIT_DEFAULT, } from './model.js';
 import { asRecord } from './util.js';
 export const MAX_CANDIDATES = 20;
 export const MAX_CARDS = 500;
@@ -20,6 +20,7 @@ export function emptyFeishuData() {
         cards: [],
         botMessageIds: [],
         rateLimitPerHour: RATE_LIMIT_DEFAULT,
+        followMinutes: FOLLOW_MINUTES_DEFAULT,
     };
 }
 const CARD_KINDS = ['bug', 'feature', 'question', 'invalid'];
@@ -184,6 +185,8 @@ export function parseFeishuData(raw) {
     }
     if (isRateLimit(r.rateLimitPerHour))
         data.rateLimitPerHour = r.rateLimitPerHour;
+    if (isFollowMinutes(r.followMinutes))
+        data.followMinutes = r.followMinutes;
     const triageModel = parseModelRef(r.triageModel);
     if (triageModel)
         data.triageModel = triageModel;
