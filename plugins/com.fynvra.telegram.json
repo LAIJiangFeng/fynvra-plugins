@@ -39,6 +39,12 @@
       "commit": "80db2dbd2ee564b2cf98aad6b39652cdcba810d4",
       "path": "official/com.fynvra.telegram",
       "changelog": "引用回复时读取被引用的消息（文字、图片、文件、部分引用）；@ 前后同一人发的文字一起读；引用已有反馈会关联到那张卡片"
+    },
+    {
+      "version": "0.1.8",
+      "commit": "d04292bcd6735f82063dca5367d1baa1ea726a62",
+      "path": "official/com.fynvra.telegram",
+      "changelog": "连续对话：机器人回复后，几分钟内跟随该成员的消息，不是对机器人说的不回复；编辑消息补上 @ 也会处理"
     }
   ]
 }
