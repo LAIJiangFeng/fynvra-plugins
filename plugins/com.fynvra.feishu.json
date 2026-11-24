@@ -21,6 +21,12 @@
       "commit": "45c464d41d4506fcb1f640f6280947c867c0a546",
       "path": "official/com.fynvra.feishu",
       "changelog": "引用回复时读取被引用的消息；话题里读第一条消息；支持合并转发的聊天记录；@ 前后同一人发的文字一起读；投递前撤回的消息不再投递"
+    },
+    {
+      "version": "0.1.2",
+      "commit": "2d237eac45d30b9c64e9d3bec994b0ea86ae1c0c",
+      "path": "official/com.fynvra.feishu",
+      "changelog": "群里连续对话：机器人回复后，几分钟内跟随该成员的消息，不是对机器人说的不回复"
     }
   ]
 }
