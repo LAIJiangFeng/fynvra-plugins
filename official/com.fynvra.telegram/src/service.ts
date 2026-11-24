@@ -1243,19 +1243,15 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     if (isMaintainer(from.id) && !open && (repliedId !== undefined || windowOpen || mention !== null)) {
       const decision = parseDecision(mention ?? text);
       const routed = target.cardId ?? target.contextCardId ?? (windowOpen ? window.cardId : undefined);
-      const routedCard = routed === undefined ? undefined : cardById(routed);
+      // 没路由到卡片时只看本群最新的话题（24 小时内最新更新的卡片），不去翻旧的待确认需求
       const card =
         decision === null
           ? undefined
-          : (routedCard ??
-            data.cards
-              .filter(
-                (c) =>
-                  c.chatId === chat.id &&
-                  c.status === 'pending-approval' &&
-                  now() - c.updatedAt <= DECISION_CARD_MS
-              )
-              .sort((a, b) => b.updatedAt - a.updatedAt)[0]);
+          : routed !== undefined
+            ? cardById(routed)
+            : data.cards
+                .filter((c) => c.chatId === chat.id && now() - c.updatedAt <= DECISION_CARD_MS)
+                .sort((a, b) => b.updatedAt - a.updatedAt)[0];
       if (
         decision !== null &&
         card?.kind === 'feature' &&
