@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "sequence": 1795451875,
-  "generatedAt": "2026-11-23T16:37:55.651Z",
+  "sequence": 1795483163,
+  "generatedAt": "2026-11-24T01:19:23.748Z",
   "plugins": [
     {
       "id": "com.fynvra.feishu",
@@ -21,6 +21,32 @@
       "tier": "official",
       "kind": "fynvra",
       "versions": [
+        {
+          "version": "0.1.2",
+          "engines": {
+            "fynvra": ">=0.1.0"
+          },
+          "commit": "2d237eac45d30b9c64e9d3bec994b0ea86ae1c0c",
+          "permissions": [
+            "notifications",
+            "network",
+            "workspaces",
+            "channel",
+            "ui"
+          ],
+          "changelog": "群里连续对话：机器人回复后，几分钟内跟随该成员的消息，不是对机器人说的不回复",
+          "publishedAt": "2026-11-24T01:19:23.748Z",
+          "package": {
+            "path": "packages/com.fynvra.feishu/0.1.2.zip",
+            "sha256": "f8ba5668fdd8bafa03b5ff60cb984e42bb5b12815bb84a8a8c096c3925838138",
+            "size": 4348178
+          },
+          "readme": {
+            "path": "readme/com.fynvra.feishu/0.1.2.md",
+            "sha256": "807cbd16e937cc4aaeb2560b4a9f6861f1a06dd1c70743d7a6a25d080d9683d2",
+            "size": 15221
+          }
+        },
         {
           "version": "0.1.1",
           "engines": {
@@ -92,6 +118,32 @@
       "tier": "official",
       "kind": "fynvra",
       "versions": [
+        {
+          "version": "0.1.8",
+          "engines": {
+            "fynvra": ">=0.1.0"
+          },
+          "commit": "d04292bcd6735f82063dca5367d1baa1ea726a62",
+          "permissions": [
+            "notifications",
+            "network",
+            "workspaces",
+            "channel",
+            "ui"
+          ],
+          "changelog": "连续对话：机器人回复后，几分钟内跟随该成员的消息，不是对机器人说的不回复；编辑消息补上 @ 也会处理",
+          "publishedAt": "2026-11-24T01:19:23.748Z",
+          "package": {
+            "path": "packages/com.fynvra.telegram/0.1.8.zip",
+            "sha256": "c33c52983be6c90773e34931aad30eebed1e35ceea3696c937933bc6cdce5927",
+            "size": 133206
+          },
+          "readme": {
+            "path": "readme/com.fynvra.telegram/0.1.8.md",
+            "sha256": "092aa0bdcf96569b9fc56e0843a29992876edf6309448260ce07eacec59223ed",
+            "size": 15612
+          }
+        },
         {
           "version": "0.1.7",
           "engines": {
