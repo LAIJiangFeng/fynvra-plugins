@@ -1240,18 +1240,13 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
       const addressed = repliedId !== undefined || window !== undefined || parsed.mentioned || p2p;
       const decision = addressed ? decisionOf(text) : undefined;
       if (decision) {
-        const routed =
-          target.cardId ?? target.contextCardId ?? (body === null ? window?.cardId : undefined);
+        const routed = target.cardId ?? target.contextCardId ?? window?.cardId;
+        // 没有路由时只看当前话题：本会话 24 小时内最新更新的那张卡片（不跳过它去找更早的待确认需求）
         const card =
           routed !== undefined
             ? cardById(routed)
             : data.cards
-                .filter(
-                  (c) =>
-                    c.chatId === chatId &&
-                    c.status === 'pending-approval' &&
-                    now() - c.updatedAt <= DECISION_WINDOW_MS
-                )
+                .filter((c) => c.chatId === chatId && now() - c.updatedAt <= DECISION_WINDOW_MS)
                 .reduce<StoredCard | undefined>((a, c) => (a && a.updatedAt >= c.updatedAt ? a : c), undefined);
         if (
           card?.kind === 'feature' &&
