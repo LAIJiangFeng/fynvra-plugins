@@ -27,6 +27,12 @@
       "commit": "2d237eac45d30b9c64e9d3bec994b0ea86ae1c0c",
       "path": "official/com.fynvra.feishu",
       "changelog": "群里连续对话：机器人回复后，几分钟内跟随该成员的消息，不是对机器人说的不回复"
+    },
+    {
+      "version": "0.1.3",
+      "commit": "473de60a663d0acf83ec98d8a925934a02349797",
+      "path": "official/com.fynvra.feishu",
+      "changelog": "绑定维护者账号：维护者在群里提的需求清楚合理就直接开始做，有顾虑时先说明、回复「确认」再做；维护者回复「确认 / 算了」即可采纳或放弃待确认的需求"
     }
   ]
 }
