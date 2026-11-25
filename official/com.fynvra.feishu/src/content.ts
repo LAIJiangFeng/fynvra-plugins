@@ -16,9 +16,11 @@ export const TEMPLATES = {
   unreported: '收到，不过这次没处理好，请稍后再发一次。',
   /** 同一人在一个限流窗口内只提示一次 */
   rateLimited: '你发得有点快，请过一会儿再发。',
-  /** 只有完整的 GitHub PR 地址才在群里带链接，其余只说已提交 */
-  prOpened: (url: string) =>
-    GITHUB_PR_URL.test(url) ? `已提交修复 PR：${url}` : '已提交修复 PR。',
+  /** 只有完整的 GitHub PR 地址才在群里带链接，其余只说已提交；feature 不说「修复」 */
+  prOpened: (url: string, kind?: FeishuCardKind) => {
+    const label = kind === 'feature' ? '已提交 PR' : '已提交修复 PR';
+    return GITHUB_PR_URL.test(url) ? `${label}：${url}` : `${label}。`;
+  },
   /** 维护者在私聊里用绑定码绑定成功 */
   bound: '已绑定为维护者。之后你在群里提的需求会直接处理。',
   /** 私聊发「绑定 <码>」但码无效、过期或已用过 */
@@ -28,6 +30,30 @@ export const TEMPLATES = {
   maintainerApproved: (id: number) => `好的，开始做（#${id}），做好后会把 PR 发到这里。`,
   maintainerRejected: (id: number) => `好的，这个先不做（#${id}）。`,
 } as const;
+
+/** 合并空白后 trim，超过 80 字截断加「…」 */
+const briefLine = (text: string): string => {
+  const chars = Array.from(text.replace(/\s+/g, ' ').trim());
+  return chars.length > 80 ? `${chars.slice(0, 80).join('')}…` : chars.join('');
+};
+
+/** PR 已开的群消息：第一行链接，再附改动（带 PR 的任务标题）与解决 / 需求（卡片标题），空的行不写 */
+export function prOpenedMessage(input: {
+  url: string;
+  kind?: FeishuCardKind;
+  change: string;
+  solved: string;
+}): string {
+  const change = briefLine(input.change);
+  const solved = briefLine(input.solved);
+  return [
+    TEMPLATES.prOpened(input.url, input.kind),
+    change && `改动：${change}`,
+    solved && `${input.kind === 'feature' ? '需求' : '解决'}：${solved}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
 
 /** 维护者一句话确认 / 取消的词（已去掉末尾标点、转小写后完全匹配） */
 const CONFIRM_WORDS: ReadonlySet<string> = new Set(

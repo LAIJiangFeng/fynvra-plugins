@@ -33,6 +33,7 @@ import {
   pullRequestSection,
   pullRequestSource,
   TEMPLATES,
+  prOpenedMessage,
   triagePrompt,
 } from './content.js';
 import {
@@ -673,6 +674,18 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
     }
     card.lastReply = filtered;
     await sendToGroup(card, filtered, replyTo);
+  };
+
+  /** PR 已开：附带的改动 / 解决是 AI 写的，要过滤；被拒或含 App Secret 时只发第一行 */
+  const sendPrOpened = async (card: StoredCard, url: string, change: string) => {
+    const first = TEMPLATES.prOpened(url, card.kind);
+    const full = prOpenedMessage({ url, kind: card.kind, change, solved: card.title });
+    const filtered = full === first ? first : await filterOutbound(full);
+    const safe =
+      filtered === null || (data.appSecret !== undefined && filtered.includes(data.appSecret))
+        ? first
+        : filtered;
+    await sendToGroup(card, safe, card.messageId);
   };
 
   // ---------- 会话 ----------
@@ -1908,13 +1921,14 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
     for (const card of cards) {
       if (card.status !== 'fixing') continue;
       const tasks = snapshot.tasks.filter((task) => card.taskIds.includes(task.id));
-      const url = tasks.find((task) => task.pullRequest)?.pullRequest?.url;
-      if (url && /^https:\/\/\S+$/.test(url)) {
+      const prTask = tasks.find((task) => task.pullRequest);
+      const url = prTask?.pullRequest?.url;
+      if (prTask && url && /^https:\/\/\S+$/.test(url)) {
         card.status = 'pr-opened';
         card.prUrl = url;
         card.updatedAt = now();
         changed = true;
-        await sendToGroup(card, TEMPLATES.prOpened(url), card.messageId);
+        await sendPrOpened(card, url, prTask.title);
         notify('飞书反馈修复 PR 已开', `卡片 #${card.id}：${card.title}\n${url}`);
         continue;
       }
