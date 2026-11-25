@@ -57,6 +57,12 @@
       "commit": "2001c24d8d58b3bf29ffbb53c23f0d29c2f24222",
       "path": "official/com.fynvra.telegram",
       "changelog": "维护者绑定改为一个按钮加链接，设置页更简洁；链接失效时机器人会提示重新生成"
+    },
+    {
+      "version": "0.1.11",
+      "commit": "87fec86d9c97e5af76065bed05d4108a74fbe1c1",
+      "path": "official/com.fynvra.telegram",
+      "changelog": "PR 开出后，群里的消息附上简短的改动和解决内容"
     }
   ]
 }
