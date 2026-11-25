@@ -24,10 +24,20 @@
     "sha256": "8edc157a94104712020ac5cf4372bf22e546201d8317cc8a0ddb0cb4c01d32e8",
     "size": 4356300
   },
+  "com.fynvra.feishu@0.1.5": {
+    "commit": "59e39654a5b0e4c5b8742df9b206762d720b9ba3",
+    "sha256": "e585a65da275963392271ec913ff78b9f9e81b99ebd53943e97c79aa8dac9612",
+    "size": 4357521
+  },
   "com.fynvra.telegram@0.1.10": {
     "commit": "2001c24d8d58b3bf29ffbb53c23f0d29c2f24222",
     "sha256": "64bf5f5ee08b2a186521b457bbcfa1ee5a588c7acebc7dc74e88892bbf31fcb3",
     "size": 141167
+  },
+  "com.fynvra.telegram@0.1.11": {
+    "commit": "87fec86d9c97e5af76065bed05d4108a74fbe1c1",
+    "sha256": "a8a1a3c4b8c54629800e9f831cd61ec5beeefea7d61fa0b219abee479097582f",
+    "size": 142297
   },
   "com.fynvra.telegram@0.1.3": {
     "commit": "cbbe8efd0b3d4db5f9d251f02a8804aa837eee5a",
