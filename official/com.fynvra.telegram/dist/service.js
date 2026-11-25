@@ -5,7 +5,7 @@
 import { randomBytes } from 'node:crypto';
 import { isFollowMinutes, isTelegramRateLimit, maskTelegramToken, } from './model.js';
 import { addMessageAttachments, cleanupStaleAttachments, downloadAttachments, mergeAttachments, rejectionSummary, removeFiles, } from './attachments.js';
-import { dutyPrompt, MAX_FOLLOW_UPS, mentionsOthers, parseAssessment, parseBotMention, parseBugCommand, parseDecision, parseTriageInput, pullRequestSection, TEMPLATES, triagePrompt, } from './content.js';
+import { dutyPrompt, MAX_FOLLOW_UPS, mentionsOthers, parseAssessment, parseBotMention, parseBugCommand, parseDecision, parseTriageInput, prOpenedMessage, pullRequestSection, TEMPLATES, triagePrompt, } from './content.js';
 import { displayName, FORWARDED_MARK, isForwarded, readReply } from './quote.js';
 import { createTelegramStore, emptyTelegramData, MAINTAINER_LABEL_MAX, MAX_CANDIDATES, MAX_CARDS, parseModelRef, parseTelegramData, PROJECT_NOTE_MAX, TOKEN_SECRET_KEY, } from './store.js';
 import { redactToken, TELEGRAM_TOKEN_PATTERN, TelegramApiError, } from './telegramApi.js';
@@ -1640,13 +1640,17 @@ export function createTelegramService(deps) {
             if (card.status !== 'fixing')
                 continue;
             const tasks = snapshot.tasks.filter((task) => card.taskIds.includes(task.id));
-            const url = tasks.find((task) => task.pullRequest)?.pullRequest?.url;
+            const prTask = tasks.find((task) => task.pullRequest);
+            const url = prTask?.pullRequest?.url;
             if (url && /^https:\/\/\S+$/.test(url)) {
                 card.status = 'pr-opened';
                 card.prUrl = url;
                 card.updatedAt = now();
                 changed = true;
-                await sendToGroup(card, TEMPLATES.prOpened(url), card.messageId);
+                // 任务标题和卡片标题是 AI 写的，过滤被拒或含插件 token 时退回只发第一行
+                const message = await filterOutbound(prOpenedMessage({ url, kind: card.kind, change: prTask?.title, solved: card.title }));
+                const safe = message !== null && !(data.token !== undefined && message.includes(data.token));
+                await sendToGroup(card, safe ? message : TEMPLATES.prOpened(url, card.kind), card.messageId);
                 notify('Telegram 修复 PR 已开', `卡片 #${card.id}：${card.title}\n${url}`);
                 continue;
             }

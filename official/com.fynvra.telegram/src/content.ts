@@ -16,9 +16,11 @@ export const TEMPLATES = {
   unreported: '收到，不过这次没处理好，请稍后再 @ 我一次。',
   /** 同一人在一个限流窗口内只提示一次 */
   rateLimited: '你发得有点快，请过一会儿再 @ 我。',
-  /** 只有完整的 GitHub PR 地址才在群里带链接，其余只说已提交 */
-  prOpened: (url: string) =>
-    GITHUB_PR_URL.test(url) ? `已提交修复 PR：${url}` : '已提交修复 PR。',
+  /** 只有完整的 GitHub PR 地址才在群里带链接，其余只说已提交；feature 不说「修复」 */
+  prOpened: (url: string, kind?: TelegramCardKind) => {
+    const head = kind === 'feature' ? '已提交 PR' : '已提交修复 PR';
+    return GITHUB_PR_URL.test(url) ? `${head}：${url}` : `${head}。`;
+  },
   /** 私聊里绑定维护者成功 */
   maintainerBound: '已绑定为维护者。之后你在群里提的需求会直接处理。',
   /** 私聊里收到形如绑定码、但无效 / 过期 / 已用过的 /start */
@@ -28,6 +30,30 @@ export const TEMPLATES = {
   maintainerApproved: (id: number) => `好的，开始做（#${id}），做好后会把 PR 发到这里。`,
   maintainerRejected: (id: number) => `好的，这个先不做（#${id}）。`,
 } as const;
+
+/** 换行和连续空白合并成一个空格，超过 80 字截断加「…」 */
+function brief(text: string | undefined): string {
+  const chars = Array.from((text ?? '').replace(/\s+/g, ' ').trim());
+  return chars.length > 80 ? `${chars.slice(0, 80).join('')}…` : chars.join('');
+}
+
+/** PR 已开的群消息：第一行同 TEMPLATES.prOpened，再附「改动」和「解决 / 需求」，为空的行不写 */
+export function prOpenedMessage(input: {
+  url: string;
+  kind?: TelegramCardKind;
+  change?: string;
+  solved?: string;
+}): string {
+  const change = brief(input.change);
+  const solved = brief(input.solved);
+  return [
+    TEMPLATES.prOpened(input.url, input.kind),
+    change && `改动：${change}`,
+    solved && `${input.kind === 'feature' ? '需求' : '解决'}：${solved}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
 
 /** 维护者条目投递给分诊时的可信说明（放在 untrusted 之外） */
 export const MAINTAINER_NOTE =

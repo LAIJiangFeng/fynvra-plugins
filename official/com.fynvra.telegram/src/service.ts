@@ -31,6 +31,7 @@ import {
   parseBugCommand,
   parseDecision,
   parseTriageInput,
+  prOpenedMessage,
   pullRequestSection,
   TEMPLATES,
   triagePrompt,
@@ -1843,13 +1844,24 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
     for (const card of cards) {
       if (card.status !== 'fixing') continue;
       const tasks = snapshot.tasks.filter((task) => card.taskIds.includes(task.id));
-      const url = tasks.find((task) => task.pullRequest)?.pullRequest?.url;
+      const prTask = tasks.find((task) => task.pullRequest);
+      const url = prTask?.pullRequest?.url;
       if (url && /^https:\/\/\S+$/.test(url)) {
         card.status = 'pr-opened';
         card.prUrl = url;
         card.updatedAt = now();
         changed = true;
-        await sendToGroup(card, TEMPLATES.prOpened(url), card.messageId);
+        // 任务标题和卡片标题是 AI 写的，过滤被拒或含插件 token 时退回只发第一行
+        const message = await filterOutbound(
+          prOpenedMessage({ url, kind: card.kind, change: prTask?.title, solved: card.title })
+        );
+        const safe =
+          message !== null && !(data.token !== undefined && message.includes(data.token));
+        await sendToGroup(
+          card,
+          safe ? message : TEMPLATES.prOpened(url, card.kind),
+          card.messageId
+        );
         notify('Telegram 修复 PR 已开', `卡片 #${card.id}：${card.title}\n${url}`);
         continue;
       }
