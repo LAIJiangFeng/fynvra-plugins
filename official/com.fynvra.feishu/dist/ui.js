@@ -1,7 +1,7 @@
 // 设置页：把服务状态生成 UI 描述 v1（纯函数），并把用户操作（ui.action）分派给服务。
 // 按 Fynvra 渲染器的规则排版：field 后紧跟的 text 是说明，紧跟的按钮并入同一行。
 // 插件的启用和停用在 Fynvra 的插件卡片上，这里不放开关。
-import { isFeishuId } from './feishuApi.js';
+import { APP_ID_PATTERN, isFeishuId } from './feishuApi.js';
 import { CHAT_TYPE_TEXT, chatFallbackTitle, FOLLOW_MINUTES_MAX, isThinkingLevel, RATE_LIMIT_MAX, } from './model.js';
 import { httpsUrl, isUiId } from './types/appPluginUi.js';
 import { asRecord } from './util.js';
@@ -238,29 +238,45 @@ export function buildSettingsUi(state, workspaces, models, now = Date.now()) {
         });
     }
     connection.push({ type: 'text', text: '需要的权限和事件见使用说明', tone: 'muted' });
-    const maintainer = [
-        {
-            type: 'keyValue',
-            items: [{ label: '维护者', value: state.maintainer ? clip(state.maintainer.label, 200) : '未绑定' }],
-        },
-        { type: 'button', label: '生成绑定码', action: ACTIONS.bindCode },
-    ];
-    if (state.bindCode) {
-        maintainer.push({
-            type: 'text',
-            text: '用要绑定的飞书账号私聊机器人，发送：绑定 <码>（10 分钟内有效）',
-            tone: 'muted',
-        }, { type: 'text', text: state.bindCode });
-    }
-    if (state.maintainer) {
-        maintainer.push({
-            type: 'button',
-            label: '解除绑定',
-            action: ACTIONS.unbind,
-            tone: 'destructive',
-            confirm: '解除后，机器人不再把这个账号当作维护者。确定解除绑定？',
-        });
-    }
+    // 维护者：一张卡片，按钮在右边
+    const maintainerItem = state.maintainer
+        ? {
+            key: 'maintainer',
+            title: '维护者',
+            subtitle: clip(state.maintainer.label, 200),
+            controls: [
+                {
+                    type: 'button',
+                    label: '解除绑定',
+                    action: ACTIONS.unbind,
+                    tone: 'destructive',
+                    confirm: '解除后，机器人不再把这个账号当作维护者。确定解除绑定？',
+                },
+            ],
+        }
+        : state.bindCode
+            ? {
+                key: 'maintainer',
+                title: '维护者',
+                subtitle: '未绑定 · 把下面的码私聊发给机器人，10 分钟内有效',
+                body: state.bindCode,
+                ...(state.appId && APP_ID_PATTERN.test(state.appId)
+                    ? {
+                        link: {
+                            label: '打开机器人私聊',
+                            url: `https://applink.feishu.cn/client/bot/open?appId=${encodeURIComponent(state.appId)}`,
+                        },
+                    }
+                    : {}),
+                controls: [{ type: 'button', label: '重新生成', action: ACTIONS.bindCode }],
+            }
+            : {
+                key: 'maintainer',
+                title: '维护者',
+                subtitle: '未绑定',
+                controls: [{ type: 'button', label: '绑定', action: ACTIONS.bindCode }],
+            };
+    const maintainer = [{ type: 'list', items: [maintainerItem] }];
     const typeBadge = (type) => ({ text: CHAT_TYPE_TEXT[type], tone: 'muted' });
     const candidates = state.candidates.map((candidate) => ({
         key: candidate.chatId,

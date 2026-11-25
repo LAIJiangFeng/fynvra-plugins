@@ -1140,27 +1140,40 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
     id !== undefined &&
     (data.botMessageIds.includes(id) || data.cards.some((c) => c.botMessageIds.includes(id)));
 
-  /** M1：私聊发来「绑定 <码>」且码有效：绑定发送者为维护者；返回是否已处理 */
+  /**
+   * M1：私聊绑定。码有效（「绑定 <码>」或只发码）：绑定发送者为维护者；
+   * 「绑定 <码>」但码无效：回复无效、不进分诊和候选。返回是否已处理。
+   */
   const tryBind = (event: FeishuMessageEvent, botOpenId: string): boolean => {
+    const found = bindCodeOf(parseMessage(event, botOpenId)?.text ?? '');
+    if (!found) return false;
     const code = validBindCode();
-    if (!code || bindCodeOf(parseMessage(event, botOpenId)?.text ?? '') !== code) return false;
+    if (!code || found.code !== code) {
+      // 只发 16 位字符串可能是普通单词，按原流程处理
+      if (!found.explicit) return false;
+      replyP2p(event.messageId, TEMPLATES.bindInvalid, '发送绑定无效回复失败');
+      return true;
+    }
     clearBindCode();
     const openId = event.senderOpenId;
     data.maintainer = { openId, label: memberLabel(openId), boundAt: now() };
     notify('飞书维护者已绑定', `已绑定维护者：${data.maintainer.label}`);
     commit();
-    // 未允许的私聊也要回复：不走 replyTo 的会话检查
-    const c = creds();
-    if (c) {
-      deps.feishu
-        .reply(c, event.messageId, TEMPLATES.bound)
-        .then((sent) => {
-          data.botMessageIds = [...data.botMessageIds, sent.messageId].slice(-MAX_BOT_MESSAGES);
-          commit();
-        })
-        .catch((error) => warn(`发送绑定回复失败：${errorMessage(error)}`));
-    }
+    replyP2p(event.messageId, TEMPLATES.bound, '发送绑定回复失败');
     return true;
+  };
+
+  /** 未允许的私聊也要回复：不走 replyTo 的会话检查 */
+  const replyP2p = (messageId: string, text: string, failure: string) => {
+    const c = creds();
+    if (!c) return;
+    deps.feishu
+      .reply(c, messageId, text)
+      .then((sent) => {
+        data.botMessageIds = [...data.botMessageIds, sent.messageId].slice(-MAX_BOT_MESSAGES);
+        commit();
+      })
+      .catch((error) => warn(`${failure}：${errorMessage(error)}`));
   };
 
   const handleMessage = (event: FeishuMessageEvent) => {
@@ -1176,7 +1189,7 @@ export function createFeishuService(deps: FeishuServiceDeps): FeishuService {
     if (!bot) return;
     const chatId = event.chatId;
     const p2p = event.chatType === 'p2p';
-    // M1：私聊里的绑定消息（不管这个私聊有没有允许）；码无效时按原流程处理
+    // M1：私聊里的绑定消息（不管这个私聊有没有允许）
     if (p2p && tryBind(event, bot.openId)) return;
     const group = groupOf(chatId);
     if (!group) {

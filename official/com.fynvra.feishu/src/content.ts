@@ -21,6 +21,8 @@ export const TEMPLATES = {
     GITHUB_PR_URL.test(url) ? `已提交修复 PR：${url}` : '已提交修复 PR。',
   /** 维护者在私聊里用绑定码绑定成功 */
   bound: '已绑定为维护者。之后你在群里提的需求会直接处理。',
+  /** 私聊发「绑定 <码>」但码无效、过期或已用过 */
+  bindInvalid: '绑定码无效或已过期，请在 Fynvra 里重新生成。',
   /** 维护者的需求评估有顾虑、回复里没写怎么确认时补在末尾 */
   confirmHint: '回复「确认」开始做，回复「算了」就不做。',
   maintainerApproved: (id: number) => `好的，开始做（#${id}），做好后会把 PR 发到这里。`,
@@ -43,9 +45,15 @@ export function decisionOf(text: string): 'approve' | 'reject' | undefined {
   return undefined;
 }
 
-/** 绑定消息「绑定 <码>」或「/bind <码>」里的码；不是绑定消息返回 undefined */
-export function bindCodeOf(text: string): string | undefined {
-  return /^(?:绑定|\/bind)\s+(\S+)$/.exec(text.trim())?.[1];
+/**
+ * 绑定消息里的码：「绑定 <码>」「/bind <码>」（空格可有可无）的 explicit 为 true；整条只有码时为 false。
+ * 不像绑定消息返回 undefined。
+ */
+export function bindCodeOf(text: string): { code: string; explicit: boolean } | undefined {
+  const clean = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  const explicit = /^(?:绑定|\/bind)\s*([A-Za-z0-9_-]{16})$/.exec(clean)?.[1];
+  if (explicit) return { code: explicit, explicit: true };
+  return /^[A-Za-z0-9_-]{16}$/.test(clean) ? { code: clean, explicit: false } : undefined;
 }
 
 /** 维护者条目的可信说明（插件生成，放在 untrusted-content 之外） */
