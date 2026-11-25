@@ -51,6 +51,12 @@
       "commit": "50f3ab5efde90c859597df38e332c677c4949bb3",
       "path": "official/com.fynvra.telegram",
       "changelog": "绑定维护者账号：维护者在群里提的需求清楚合理就直接开始做，有顾虑时先说明、回复「确认」再做；维护者回复「确认 / 算了」即可采纳或放弃待确认的需求"
+    },
+    {
+      "version": "0.1.10",
+      "commit": "2001c24d8d58b3bf29ffbb53c23f0d29c2f24222",
+      "path": "official/com.fynvra.telegram",
+      "changelog": "维护者绑定改为一个按钮加链接，设置页更简洁；链接失效时机器人会提示重新生成"
     }
   ]
 }
