@@ -39,6 +39,12 @@
       "commit": "f461a53a52fd3051cf08aaa2854e64b39305015f",
       "path": "official/com.fynvra.feishu",
       "changelog": "修复绑定码前面不带空格时无法绑定；维护者绑定改为一个按钮，设置页更简洁"
+    },
+    {
+      "version": "0.1.5",
+      "commit": "59e39654a5b0e4c5b8742df9b206762d720b9ba3",
+      "path": "official/com.fynvra.feishu",
+      "changelog": "PR 开出后，群里的消息附上简短的改动和解决内容"
     }
   ]
 }
