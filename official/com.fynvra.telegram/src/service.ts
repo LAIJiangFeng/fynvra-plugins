@@ -1065,13 +1065,24 @@ export function createTelegramService(deps: TelegramServiceDeps): TelegramServic
 
   /**
    * M1：私聊里只认「/start <有效的绑定码>」，把发送者绑定为维护者；
-   * 其余私聊（含码不对、过期）一律忽略、不回复，免得被探测。
+   * 形如绑定码（16 位 base64url）但无效 / 过期 / 已用过的，回复「链接已失效」
+   * （码是 96 位随机数，回复不会被用来试探）；其余私聊一律忽略、不回复。
    */
   const handlePrivate = (message: TgMessage) => {
     const from = message.from;
+    if (!from || from.is_bot || !Number.isSafeInteger(from.id)) return;
+    const text = typeof message.text === 'string' ? message.text.trim() : '';
+    const match = /^\/start ([A-Za-z0-9_-]{16})$/.exec(text);
+    if (!match) return;
     const code = validBindCode();
-    if (!from || from.is_bot || !code || !Number.isSafeInteger(from.id)) return;
-    if (typeof message.text !== 'string' || message.text.trim() !== `/start ${code.code}`) return;
+    if (!code || match[1] !== code.code) {
+      const token = data.token;
+      if (!token) return;
+      deps.telegram
+        .sendMessage(token, { chatId: message.chat.id, text: TEMPLATES.bindLinkExpired })
+        .catch((error) => warn(`发送绑定回复失败：${errorMessage(error)}`));
+      return;
+    }
     bindCode = undefined;
     clearTimeout(bindTimer);
     const name = displayName(from);

@@ -21,6 +21,8 @@ export const TEMPLATES = {
     GITHUB_PR_URL.test(url) ? `已提交修复 PR：${url}` : '已提交修复 PR。',
   /** 私聊里绑定维护者成功 */
   maintainerBound: '已绑定为维护者。之后你在群里提的需求会直接处理。',
+  /** 私聊里收到形如绑定码、但无效 / 过期 / 已用过的 /start */
+  bindLinkExpired: '绑定链接已失效，请在 Fynvra 里重新生成。',
   /** 维护者的需求评估有顾虑：回复里没写「确认」时接在末尾 */
   maintainerConfirmHint: '回复「确认」开始做，回复「算了」就不做。',
   maintainerApproved: (id: number) => `好的，开始做（#${id}），做好后会把 PR 发到这里。`,

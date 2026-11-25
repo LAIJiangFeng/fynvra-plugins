@@ -44,34 +44,43 @@ export const ACTIONS = {
   unbind: 'maintainer.unbind',
 } as const;
 
-const BIND_HINT =
-  '用要绑定的 Telegram 账号打开下面的链接（会打开和机器人的私聊并自动发送），或在和机器人的私聊里发送 /start <码>。10 分钟内有效。';
-
-/** 「维护者」分组：当前绑定、生成绑定码、解除绑定 */
+/** 「维护者」分组：一张卡片，已绑定时可解除，未绑定时生成绑定链接 */
 function maintainerNodes(state: TelegramStateView): UiNode[] {
-  const nodes: UiNode[] = [
-    { type: 'keyValue', items: [{ label: '维护者', value: state.maintainer?.label ?? '未绑定' }] },
-    { type: 'button', label: '生成绑定码', action: ACTIONS.bindCode },
-  ];
+  let item: UiListItem;
   if (state.maintainer) {
-    nodes.push({
-      type: 'button',
-      label: '解除绑定',
-      action: ACTIONS.unbind,
-      tone: 'destructive',
-      confirm: '解除后他在群里提的需求按普通成员处理。确定解除绑定？',
-    });
+    item = {
+      key: 'maintainer',
+      title: '维护者',
+      subtitle: state.maintainer.label,
+      controls: [
+        {
+          type: 'button',
+          label: '解除绑定',
+          action: ACTIONS.unbind,
+          tone: 'destructive',
+          confirm: '解除后他在群里提的需求按普通成员处理。确定解除绑定？',
+        },
+      ],
+    };
+  } else {
+    const code = state.bindCode;
+    const url = code && state.bot ? httpsUrl(`https://t.me/${state.bot.username}?start=${code.code}`) : null;
+    item = url
+      ? {
+          key: 'maintainer',
+          title: '维护者',
+          subtitle: '未绑定 · 链接 10 分钟内有效',
+          link: { label: '在 Telegram 中绑定', url },
+          controls: [{ type: 'button', label: '重新生成', action: ACTIONS.bindCode }],
+        }
+      : {
+          key: 'maintainer',
+          title: '维护者',
+          subtitle: '未绑定',
+          controls: [{ type: 'button', label: '绑定', action: ACTIONS.bindCode }],
+        };
   }
-  const code = state.bindCode;
-  if (code) {
-    nodes.push({ type: 'text', text: BIND_HINT, tone: 'muted' });
-    const url = state.bot ? httpsUrl(`https://t.me/${state.bot.username}?start=${code.code}`) : null;
-    if (url) {
-      nodes.push({ type: 'list', items: [{ key: 'bindLink', title: clip(url, 200), link: { label: '打开', url } }] });
-    }
-    nodes.push({ type: 'text', text: `绑定码：${code.code}` });
-  }
-  return nodes;
+  return [{ type: 'list', items: [item] }];
 }
 
 const CONNECTION_TEXT: Record<TelegramConnection, string> = {
