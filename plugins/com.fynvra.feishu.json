@@ -33,6 +33,12 @@
       "commit": "3871c994cf541657bf432b3855ea5cc24a0b08e0",
       "path": "official/com.fynvra.feishu",
       "changelog": "绑定维护者账号：维护者在群里提的需求清楚合理就直接开始做，有顾虑时先说明、回复「确认」再做；维护者回复「确认 / 算了」即可采纳或放弃待确认的需求"
+    },
+    {
+      "version": "0.1.4",
+      "commit": "f461a53a52fd3051cf08aaa2854e64b39305015f",
+      "path": "official/com.fynvra.feishu",
+      "changelog": "修复绑定码前面不带空格时无法绑定；维护者绑定改为一个按钮，设置页更简洁"
     }
   ]
 }
